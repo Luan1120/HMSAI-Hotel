@@ -1,0 +1,34 @@
+/* === Global No-Caret Rules ===
+   Tự động ẩn caret (con trỏ văn bản nhấp nháy) trên mọi phần tử KHÔNG phải là input, textarea, select hoặc contenteditable.
+   Mục tiêu: các tiêu đề, nhãn, span hiển thị, nút, thẻ thông tin không xuất hiện caret khi người dùng click hoặc bật chế độ caret browsing.
+*/
+
+/* Chặn caret và chọn văn bản mặc định trên phần tử hiển thị (có thể override sau) */
+:root body *:where(:not(input):not(textarea):not(select):not([contenteditable="true"])):not(.allow-caret):not(.allow-select) {
+  caret-color: transparent !important;
+}
+
+/* Các nhóm thường dùng trong giao diện form / modal */
+h1,h2,h3,h4,h5,h6,
+label,
+button,
+[role="button"],
+.summary-title,
+.panel-title,
+.modal-title,
+.field-display,
+.readonly-block,
+.static-field,
+.text-static {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* Vùng cho phép chọn hoặc hiển thị caret khi cần (copy / soạn thảo đặc biệt) */
+.allow-select { user-select: text !important; -webkit-user-select: text !important; }
+.allow-caret { caret-color: auto !important; }
+
+/* Tránh làm hỏng style riêng của input password reveal icons (để nguyên trong Auth.css) */
+
+/* Ghi chú: Nếu có component rich-text cần caret, thêm class .allow-caret hoặc contenteditable="true" */

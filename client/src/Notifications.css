@@ -1,0 +1,65 @@
+.notifications-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 5000; /* cao hơn dropdown (4000) và profile overlay (2000) */
+  padding: 24px 12px;
+  animation: notifOverlayFade .25s ease;
+}
+
+.notifications-overlay__panel {
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px;
+  width: min(96vw, 760px);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 28px -4px rgba(0,0,0,.25);
+  border: 1px solid #e5e7eb;
+  position: relative;
+  animation: notifOverlayPanelIn .28s cubic-bezier(.32,.72,.28,.99);
+}
+
+.notifications-overlay__closeBtn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #f3f4f6;
+  border: none;
+  color: #111827;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.notifications-overlay__closeBtn:hover { background:#e5e7eb; }
+
+.notifications-history-list { flex:1; overflow:auto; border:1px solid #eee; border-radius:8px; }
+
+.notifications-history-item { padding:10px 12px; border-bottom:1px solid #f1f1f4; background:#fff; }
+.notifications-history-item.unread { background:#f5f9ff; }
+
+.notifications-history-actions { display:flex; gap:8px; margin-bottom:10px; }
+
+@media (max-width: 520px) {
+  .notifications-overlay__panel { padding:12px; }
+  .notifications-overlay__closeBtn { top:6px; right:6px; }
+}
+
+@keyframes notifOverlayFade {
+  0% { opacity:0; }
+  100% { opacity:1; }
+}
+@keyframes notifOverlayPanelIn {
+  0% { opacity:0; transform: translateY(10px) scale(.96); }
+  100% { opacity:1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notifications-overlay, .notifications-overlay__panel { animation: none !important; }
+}
