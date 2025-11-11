@@ -1,10 +1,8 @@
 # Node modules
 /node_modules/
-/client/node_modules/
 
 # Yarn/Npm cache and parcel/webpack caches
 /.cache/
-/client/node_modules/.cache/
 
 # Build outputs
 /build/
