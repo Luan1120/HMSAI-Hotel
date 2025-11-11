@@ -1,0 +1,17 @@
+.meteor-bg-canvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 60% 40%, #23243a 60%, #181929 100%);
+  transition: background 0.5s;
+}
+
+@media (max-width: 600px) {
+  .meteor-bg-canvas {
+    width: 100vw;
+    height: 100vh;
+  }
+}

@@ -1,0 +1,150 @@
+.profile-page {
+  padding: 24px 12px;
+}
+
+.profile-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex;
+  align-items: flex-start; /* default: top-aligned */
+  justify-content: center;
+  z-index: 2000;
+  padding: 24px 12px; /* avoid title out of viewport */
+}
+
+/* Centered variant for wide admin modals */
+.profile-overlay.profile-overlay--center { align-items: center; }
+
+.profile-modal { max-width: 760px; width: min(92vw, 760px); margin: 0 auto; }
+
+.profile-back {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  background: linear-gradient(135deg, #4d7cff, #6aa1ff);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 16px;
+  font-weight: 900;
+  letter-spacing: .3px;
+  cursor: pointer;
+  z-index: 2001;
+  box-shadow: 0 6px 18px rgba(77,124,255,.35);
+}
+
+.profile-card {
+  max-width: 720px;
+  margin: 0 auto;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+  padding: 24px 28px 28px 28px;
+}
+
+.profile-title {
+  margin: 0 0 16px;
+  text-align: center;
+}
+.date-group { display: flex; align-items: center; gap: 8px; }
+.date-icon { border: 1px solid #d0d0d0; background: #fff; border-radius: 6px; padding: 6px; cursor: pointer; width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center; }
+.date-icon img { width: 20px; height: 20px; display: block; }
+.date-popover { display: flex; gap: 8px; margin: 8px 0 0; }
+.date-popover select { border: 1px solid #d0d0d0; border-radius: 6px; padding: 8px 10px; }
+.date-apply { background: #4d7cff; color: #fff; border: none; border-radius: 6px; padding: 8px 12px; font-weight: 800; }
+.date-cancel { background: #f3f3f3; border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; }
+
+.profile-card label {
+  display: block;
+  margin: 14px 0 6px;
+  font-weight: 700;
+  color: #111;
+}
+
+.profile-card input,
+.profile-card select {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 16px;
+  outline: none;
+}
+
+.profile-card input:focus,
+.profile-card select:focus {
+  border-color: #4d7cff;
+  box-shadow: 0 0 0 3px rgba(77,124,255,0.15);
+}
+
+.profile-actions { display: flex; gap: 16px; justify-content: center; margin-top: 24px; }
+
+.btn-secondary {
+  background: #d0464a;
+  color: #fff;
+  border: none;
+  padding: 12px 20px;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: #b3373b;
+}
+
+/* Re-use primary button style from Auth.css where possible */
+.btn-primary {
+  padding: 12px 20px;
+  border-radius: 6px;
+}
+
+.profile-avatar-row { display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 8px; }
+.profile-avatar { width: 120px; height: 120px; border-radius: 50%; overflow: hidden; background: #f4f4f4; border: 2px solid #e5e5e5; display: inline-flex; align-items: center; justify-content: center; }
+.profile-avatar.clickable { cursor: pointer; }
+.profile-avatar.dragging { outline: 3px dashed #f59e0b; }
+.profile-avatar.drag-red { filter: hue-rotate(320deg) saturate(1.2); box-shadow: 0 0 0 3px rgba(239, 68, 68, .25) inset; }
+.profile-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.profile-avatar-empty { color: #999; font-weight: 800; font-size: 12px; }
+
+/* Ensure inputs/selects fit within card width */
+.profile-card input,
+.profile-card select {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Avoid layout shift on small viewports */
+@media (max-width: 480px) {
+  .profile-card { padding: 18px; }
+}
+
+.profile-trash {
+  margin: 8px auto 0 auto;
+  width: fit-content;
+  padding: 8px 12px;
+  border: 2px dashed #d92d20;
+  color: #b42318;
+  background: #fee4e2;
+  border-radius: 10px;
+  font-weight: 800;
+}
+.profile-trash.over { background: #ffd4d1; color: #a0140a; border-color: #ef4444; }
+
+/* Prevent overlay content from causing horizontal scroll */
+.profile-overlay { overflow: auto; }
+.profile-card { max-width: 720px; width: 100%; margin-left: auto; margin-right: auto; }
+
+.profile-toast {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  background: #12b76a;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgba(0,0,0,.12);
+  z-index: 2002;
+  font-weight: 800;
+}

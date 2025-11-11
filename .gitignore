@@ -1,0 +1,24 @@
+# Node modules
+/node_modules/
+/client/node_modules/
+
+# Yarn/Npm cache and parcel/webpack caches
+/.cache/
+/client/node_modules/.cache/
+
+# Build outputs
+/build/
+/client/build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# env files
+.env
+.env.local
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
