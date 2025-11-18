@@ -1679,6 +1679,101 @@ async function usersHasColumn(pool, col) {
   }
 }
 
+async function getCustomerRoleId(pool) {
+  try {
+    const rs = await pool.request()
+      .input('roleName', sql.NVarChar(50), 'Customer')
+      .query('SELECT TOP 1 Id FROM Roles WHERE Name = @roleName');
+    if (rs.recordset.length) return rs.recordset[0].Id;
+  } catch { /* ignore */ }
+  try { await ensureDefaultRoles(); } catch { /* ignore */ }
+  try {
+    const rs = await pool.request()
+      .input('roleName', sql.NVarChar(50), 'Customer')
+      .query('SELECT TOP 1 Id FROM Roles WHERE Name = @roleName');
+    if (rs.recordset.length) return rs.recordset[0].Id;
+  } catch { /* ignore */ }
+  return null;
+}
+
+function slugifyGuestName(name) {
+  return String(name || 'guest')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'guest';
+}
+
+async function ensureWalkInCustomer(pool, { name, email, phone }) {
+  const safeName = name && String(name).trim() ? String(name).trim() : 'Khách vãng lai';
+  let targetEmail = email && String(email).trim() ? String(email).trim().toLowerCase() : '';
+  const hasPhoneCol = await usersHasColumn(pool, 'Phone');
+  if (targetEmail) {
+    const selectCols = `Id, Name${hasPhoneCol ? ', Phone' : ''}`;
+    const existing = await pool.request()
+      .input('email', sql.NVarChar(100), targetEmail)
+      .query(`SELECT TOP 1 ${selectCols} FROM Users WHERE Email = @email`);
+    if (existing.recordset.length) {
+      const row = existing.recordset[0];
+      const updates = [];
+      const reqUpd = pool.request().input('id', sql.Int, row.Id);
+      if (safeName && safeName !== (row.Name || '')) {
+        updates.push('Name = @name');
+        reqUpd.input('name', sql.NVarChar(50), safeName);
+      }
+      if (hasPhoneCol && phone && phone !== (row.Phone || '')) {
+        updates.push('Phone = @phone');
+        reqUpd.input('phone', sql.NVarChar(50), phone);
+      }
+      if (updates.length) {
+        await reqUpd.query(`UPDATE Users SET ${updates.join(', ')} WHERE Id = @id`);
+      }
+      return { id: row.Id, email: targetEmail, created: false };
+    }
+  }
+
+  if (!targetEmail) {
+    const base = slugifyGuestName(safeName);
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const candidate = `${base}-${Date.now().toString(36)}${attempt ? `-${attempt}` : ''}@walkin.local`;
+      const exists = await pool.request()
+        .input('email', sql.NVarChar(100), candidate)
+        .query('SELECT 1 FROM Users WHERE Email = @email');
+      if (!exists.recordset.length) {
+        targetEmail = candidate;
+        break;
+      }
+    }
+    if (!targetEmail) {
+      targetEmail = `guest-${Date.now()}@walkin.local`;
+    }
+  }
+
+  const roleId = await getCustomerRoleId(pool);
+  const password = `WALKIN-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+  const fields = ['Email', 'Password', 'Name'];
+  const values = ['@email', '@password', '@name'];
+  const req = pool.request()
+    .input('email', sql.NVarChar(100), targetEmail)
+    .input('password', sql.NVarChar(255), password)
+    .input('name', sql.NVarChar(50), safeName);
+  if (roleId) {
+    fields.push('RoleId');
+    values.push('@roleId');
+    req.input('roleId', sql.Int, roleId);
+  }
+  if (hasPhoneCol) {
+    fields.push('Phone');
+    values.push('@phone');
+    req.input('phone', sql.NVarChar(50), phone || null);
+  }
+  const insertSql = `INSERT INTO Users (${fields.join(', ')}) OUTPUT INSERTED.Id VALUES (${values.join(', ')})`;
+  const ins = await req.query(insertSql);
+  const userId = ins.recordset[0].Id;
+  return { id: userId, email: targetEmail, created: true };
+}
+
 // ===== Promotions API REMOVED =====
 // All promotion endpoints have been removed as per requirement to delete promotion feature.
 // (Removed stray helper duplication that caused syntax issues)
@@ -3581,6 +3676,148 @@ app.get('/api/admin/bookings', authorize(['Admin']), async (req, res) => {
 });
 
 // ===== Admin: Check-in / Check-out =====
+const CANCELLED_SQL_LIST = "N'Canceled', N'Cancel', N'Cancelled', N'Huy', N'Hủy'";
+
+app.get('/api/staff/available-rooms', authorize(['Staff']), async (req, res) => {
+  const hotelId = req.query.hotelId ? Number(req.query.hotelId) : null;
+  const roomTypeId = req.query.roomTypeId ? Number(req.query.roomTypeId) : null;
+  const checkInRaw = (req.query.checkIn || '').toString();
+  const checkOutRaw = (req.query.checkOut || '').toString();
+  const cin = checkInRaw ? new Date(checkInRaw) : null;
+  const cout = checkOutRaw ? new Date(checkOutRaw) : null;
+  if (!cin || !cout || Number.isNaN(cin.getTime()) || Number.isNaN(cout.getTime()) || cout <= cin) {
+    return res.status(400).json({ message: 'Khoảng ngày không hợp lệ' });
+  }
+  try {
+    const pool = await getPool();
+    const hasRoomNumber = await tableHasColumn(pool, 'dbo.Rooms', 'RoomNumber');
+    const hasPriceCol = await tableHasColumn(pool, 'dbo.Rooms', 'Price');
+    const reqRooms = pool.request()
+      .input('cin', sql.Date, cin)
+      .input('cout', sql.Date, cout);
+    if (hotelId) reqRooms.input('hid', sql.Int, hotelId);
+    if (roomTypeId) reqRooms.input('rtid', sql.Int, roomTypeId);
+    const available = await reqRooms.query(`
+      SELECT r.Id, r.HotelId, r.RoomTypeId,
+             ${hasRoomNumber ? 'r.RoomNumber' : "CAST(r.Id AS NVARCHAR(20))"} AS RoomNumber,
+             rt.Name AS RoomTypeName,
+             rt.BasePrice,
+             ${hasPriceCol ? 'r.Price' : 'NULL'} AS RoomPrice
+      FROM Rooms r
+      INNER JOIN Room_Types rt ON rt.Id = r.RoomTypeId
+      WHERE 1=1
+        ${hotelId ? 'AND r.HotelId = @hid' : ''}
+        ${roomTypeId ? 'AND r.RoomTypeId = @rtid' : ''}
+        AND NOT EXISTS (
+          SELECT 1 FROM Bookings b
+          WHERE b.RoomId = r.Id
+            AND (COALESCE(b.Status, N'') COLLATE Vietnamese_CI_AI NOT IN (${CANCELLED_SQL_LIST}, N'Deleted'))
+            AND (COALESCE(b.PaymentStatus, N'') COLLATE Vietnamese_CI_AI NOT IN (${CANCELLED_SQL_LIST}))
+            AND NOT (b.CheckOutDate <= @cin OR b.CheckInDate >= @cout)
+        )
+      ORDER BY ${hasRoomNumber ? 'r.RoomNumber' : 'r.Id'} ASC`);
+    const items = (available.recordset || []).map(row => ({
+      id: row.Id,
+      hotelId: row.HotelId,
+      roomTypeId: row.RoomTypeId,
+      roomNumber: row.RoomNumber,
+      roomTypeName: row.RoomTypeName,
+      basePrice: Number(row.BasePrice || 0),
+      roomPrice: row.RoomPrice !== null && row.RoomPrice !== undefined ? Number(row.RoomPrice) : null,
+    }));
+    res.json({ items });
+  } catch (err) {
+    console.error('available rooms error:', err);
+    res.status(500).json({ message: 'Lỗi máy chủ khi lấy phòng trống' });
+  }
+});
+
+app.post('/api/staff/walkin-bookings', authorize(['Staff']), async (req, res) => {
+  const {
+    customerName,
+    customerEmail,
+    customerPhone,
+    hotelId: hotelIdRaw,
+    roomId: roomIdRaw,
+    roomTypeId: roomTypeRaw,
+    checkIn,
+    checkOut,
+    adults,
+    children
+  } = req.body || {};
+  const roomId = Number(roomIdRaw);
+  if (!roomId) return res.status(400).json({ message: 'Thiếu thông tin phòng' });
+  const cin = checkIn ? new Date(checkIn) : null;
+  const cout = checkOut ? new Date(checkOut) : null;
+  if (!cin || !cout || Number.isNaN(cin.getTime()) || Number.isNaN(cout.getTime()) || cout <= cin) {
+    return res.status(400).json({ message: 'Khoảng ngày không hợp lệ' });
+  }
+  try {
+    const pool = await getPool();
+    const hasPriceCol = await tableHasColumn(pool, 'dbo.Rooms', 'Price');
+    const roomRs = await pool.request()
+      .input('rid', sql.Int, roomId)
+      .query(`SELECT TOP 1 r.Id, r.HotelId, r.RoomTypeId, ${hasPriceCol ? 'r.Price' : 'NULL'} AS RoomPrice, rt.BasePrice
+              FROM Rooms r INNER JOIN Room_Types rt ON rt.Id = r.RoomTypeId WHERE r.Id = @rid`);
+    if (!roomRs.recordset.length) return res.status(404).json({ message: 'Không tìm thấy phòng' });
+    const room = roomRs.recordset[0];
+    if (hotelIdRaw && Number(hotelIdRaw) !== Number(room.HotelId)) {
+      return res.status(400).json({ message: 'Phòng không thuộc khách sạn đã chọn' });
+    }
+    if (roomTypeRaw && Number(roomTypeRaw) !== Number(room.RoomTypeId)) {
+      return res.status(400).json({ message: 'Phòng không thuộc hạng phòng đã chọn' });
+    }
+    const overlap = await pool.request()
+      .input('rid', sql.Int, roomId)
+      .input('cin', sql.Date, cin)
+      .input('cout', sql.Date, cout)
+      .query(`SELECT TOP 1 Id FROM Bookings
+              WHERE RoomId = @rid
+                AND (COALESCE(Status, N'') COLLATE Vietnamese_CI_AI NOT IN (${CANCELLED_SQL_LIST}, N'Deleted'))
+                AND (COALESCE(PaymentStatus, N'') COLLATE Vietnamese_CI_AI NOT IN (${CANCELLED_SQL_LIST}))
+                AND NOT (CheckOutDate <= @cin OR CheckInDate >= @cout)`);
+    if (overlap.recordset.length) {
+      return res.status(409).json({ message: 'Phòng đã được đặt trong khoảng thời gian này' });
+    }
+
+    const customer = await ensureWalkInCustomer(pool, { name: customerName, email: customerEmail, phone: customerPhone });
+    const nights = Math.max(1, Math.ceil((cout - cin) / (1000 * 60 * 60 * 24)));
+    const nightly = room.RoomPrice != null ? Number(room.RoomPrice) : Number(room.BasePrice || 0);
+    const totalAmount = roundCurrency((nightly || 0) * nights);
+    const adultsCount = Math.max(1, Number(adults || 1));
+    const childrenCount = Math.max(0, Number(children || 0));
+
+    const hasOriginal = await tableHasColumn(pool, 'dbo.Bookings', 'OriginalAmount');
+    const reqInsert = pool.request()
+      .input('userId', sql.Int, customer.id)
+      .input('hotelId', sql.Int, room.HotelId)
+      .input('roomTypeId', sql.Int, room.RoomTypeId)
+      .input('roomId', sql.Int, room.Id)
+      .input('checkIn', sql.Date, cin)
+      .input('checkOut', sql.Date, cout)
+      .input('adults', sql.Int, adultsCount)
+      .input('children', sql.Int, childrenCount)
+      .input('status', sql.NVarChar(20), 'Confirmed')
+      .input('paymentStatus', sql.NVarChar(50), 'Tiền mặt (tại quầy)')
+      .input('totalAmount', sql.Decimal(10, 2), totalAmount);
+    if (hasOriginal) {
+      reqInsert.input('originalAmount', sql.Decimal(10, 2), totalAmount);
+    }
+    const insertSql = hasOriginal
+      ? `INSERT INTO Bookings (UserId, HotelId, RoomTypeId, RoomId, CheckInDate, CheckOutDate, Adults, Children, Status, OriginalAmount, TotalAmount, PaymentStatus)
+         OUTPUT INSERTED.Id VALUES (@userId, @hotelId, @roomTypeId, @roomId, @checkIn, @checkOut, @adults, @children, @status, @originalAmount, @totalAmount, @paymentStatus)`
+      : `INSERT INTO Bookings (UserId, HotelId, RoomTypeId, RoomId, CheckInDate, CheckOutDate, Adults, Children, Status, TotalAmount, PaymentStatus)
+         OUTPUT INSERTED.Id VALUES (@userId, @hotelId, @roomTypeId, @roomId, @checkIn, @checkOut, @adults, @children, @status, @totalAmount, @paymentStatus)`;
+    const inserted = await reqInsert.query(insertSql);
+    const bookingId = inserted.recordset[0].Id;
+    const code = 'BK' + String(bookingId).padStart(6, '0');
+
+    res.json({ ok: true, bookingId, code, customerEmail: customer.email, nights, totalAmount });
+  } catch (err) {
+    console.error('walk-in booking error:', err);
+    res.status(500).json({ message: 'Lỗi máy chủ khi tạo đặt phòng tại quầy' });
+  }
+});
 // GET /api/admin/checkinout?date=YYYY-MM-DD&q=
 app.get('/api/admin/checkinout', authorize(['Staff']), async (req, res) => {
   const dateStr = (req.query.date || '').trim();
@@ -3627,6 +3864,8 @@ app.get('/api/admin/checkinout', authorize(['Staff']), async (req, res) => {
       LEFT JOIN Rooms ro ON ro.Id = b.RoomId
       WHERE ${where}
         AND (COALESCE(b.Status, N'') COLLATE Vietnamese_CI_AI <> N'Deleted')
+        AND (COALESCE(b.Status, N'') COLLATE Vietnamese_CI_AI NOT IN (N'Canceled', N'Cancel', N'Cancelled', N'Hủy', N'Huy'))
+        AND (COALESCE(b.PaymentStatus, N'') COLLATE Vietnamese_CI_AI NOT IN (N'Hủy', N'Huy', N'Canceled', N'Cancel', N'Cancelled'))
       ORDER BY b.CheckInDate ASC, b.Id ASC`);
     const itemsRaw = rs.recordset;
     const today = date ? new Date(date) : new Date();

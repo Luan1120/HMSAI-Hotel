@@ -1,8 +1,52 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import './HomePage.css';
 import { authHeaders, getUserRole } from './auth';
+
+const toIsoDate = (value) => {
+  if (!value) return '';
+  const dt = value instanceof Date ? value : new Date(value);
+  if (!dt || Number.isNaN(dt.getTime())) return '';
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+const formatDisplayDate = (value) => {
+  if (!value) return '—';
+  const dt = value instanceof Date ? value : new Date(value);
+  if (!dt || Number.isNaN(dt.getTime())) return '—';
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  const yy = dt.getFullYear();
+  return `${mm}/${dd}/${yy}`;
+};
+
+const addDays = (value, days) => {
+  const dt = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (!dt || Number.isNaN(dt.getTime())) return null;
+  dt.setDate(dt.getDate() + days);
+  return dt;
+};
+
+const createWalkinDefaults = () => {
+  const today = new Date();
+  const tomorrow = addDays(today, 1) || new Date(today.getTime() + 24 * 60 * 60 * 1000);
+  return {
+    customerName: '',
+    customerEmail: '',
+    customerPhone: '',
+    hotelId: '',
+    roomTypeId: '',
+    roomId: '',
+    checkIn: toIsoDate(today),
+    checkOut: toIsoDate(tomorrow),
+    adults: 1,
+    children: 0
+  };
+};
 
 export default function CheckInOut({ isModal, onClose }) {
   const role = getUserRole();
@@ -25,28 +69,202 @@ export default function CheckInOut({ isModal, onClose }) {
   const [hideDone, setHideDone] = useState(true);
   const [modal, setModal] = useState({ open: false, message: '', onConfirm: null, onCancel: null });
   const invRef = useRef(null);
+  const [showWalkinForm, setShowWalkinForm] = useState(false);
+  const [walkinForm, setWalkinForm] = useState(createWalkinDefaults);
+  const [walkinError, setWalkinError] = useState('');
+  const [walkinLoading, setWalkinLoading] = useState(false);
+  const [hotels, setHotels] = useState([]);
+  const [roomTypes, setRoomTypes] = useState([]);
+  const [availableRooms, setAvailableRooms] = useState([]);
+  const resetWalkinForm = useCallback(() => {
+    setWalkinForm(createWalkinDefaults());
+    setAvailableRooms([]);
+    setWalkinError('');
+    setWalkinLoading(false);
+  }, []);
 
-  const fmtDate = (d) => {
-    if (!d) return '';
-    const dt = (d instanceof Date) ? d : new Date(d);
-    const mm = String(dt.getMonth() + 1).padStart(2, '0');
-    const dd = String(dt.getDate()).padStart(2, '0');
-    const yy = dt.getFullYear();
-    return `${mm}/${dd}/${yy}`;
+  const handleToggleWalkinForm = () => {
+    if (showWalkinForm) {
+      resetWalkinForm();
+    }
+    setShowWalkinForm((prev) => !prev);
   };
-  const toIso = (d) => {
-    const dt = (d instanceof Date) ? d : new Date(d);
-    const y = dt.getFullYear();
-    const m = String(dt.getMonth() + 1).padStart(2, '0');
-    const da = String(dt.getDate()).padStart(2, '0');
-    return `${y}-${m}-${da}`;
+
+  const updateWalkinField = useCallback((field, value) => {
+    setWalkinForm((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === 'hotelId') {
+        next.roomTypeId = '';
+        next.roomId = '';
+      }
+      if (field === 'roomTypeId') {
+        next.roomId = '';
+      }
+      if (field === 'checkIn') {
+        const cin = new Date(value);
+        const cout = new Date(next.checkOut);
+        const cinTime = cin.getTime();
+        const coutTime = cout.getTime();
+        if (!Number.isNaN(cinTime) && !Number.isNaN(coutTime) && coutTime <= cinTime) {
+          const adjusted = addDays(cin, 1);
+          if (adjusted) next.checkOut = toIsoDate(adjusted);
+        }
+      }
+      if (field === 'checkOut') {
+        const cin = new Date(next.checkIn);
+        const cout = new Date(value);
+        const cinTime = cin.getTime();
+        const coutTime = cout.getTime();
+        if (!Number.isNaN(cinTime) && !Number.isNaN(coutTime) && coutTime <= cinTime) {
+          const adjusted = addDays(cin, 1);
+          if (adjusted) next.checkOut = toIsoDate(adjusted);
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const onWalkinFieldChange = (field) => (event) => {
+    updateWalkinField(field, event && event.target ? event.target.value : event);
   };
+
+  const handleCreateWalkin = async (event) => {
+    event.preventDefault();
+    setWalkinError('');
+    const cin = walkinForm.checkIn ? new Date(walkinForm.checkIn) : null;
+    const cout = walkinForm.checkOut ? new Date(walkinForm.checkOut) : null;
+    const cinTime = cin ? cin.getTime() : NaN;
+    const coutTime = cout ? cout.getTime() : NaN;
+    if (Number.isNaN(cinTime) || Number.isNaN(coutTime) || coutTime <= cinTime) {
+      setWalkinError('Ngày trả phòng phải sau ngày nhận phòng');
+      return;
+    }
+    if (!walkinForm.hotelId) {
+      setWalkinError('Vui lòng chọn khách sạn');
+      return;
+    }
+    if (!walkinForm.roomId) {
+      setWalkinError('Vui lòng chọn phòng trống');
+      return;
+    }
+    setWalkinLoading(true);
+    try {
+      const payload = {
+        customerName: walkinForm.customerName ? walkinForm.customerName.trim() : '',
+        customerEmail: walkinForm.customerEmail ? walkinForm.customerEmail.trim() : '',
+        customerPhone: walkinForm.customerPhone ? walkinForm.customerPhone.trim() : '',
+        hotelId: Number(walkinForm.hotelId),
+        roomTypeId: walkinForm.roomTypeId ? Number(walkinForm.roomTypeId) : undefined,
+        roomId: Number(walkinForm.roomId),
+        checkIn: walkinForm.checkIn,
+        checkOut: walkinForm.checkOut,
+        adults: Number(walkinForm.adults || 1),
+        children: Number(walkinForm.children || 0)
+      };
+      const res = await fetch('/api/staff/walkin-bookings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Tạo đặt phòng thất bại');
+      setModal({
+        open: true,
+        message: `Đã tạo đặt phòng ${data.code || ''}. Tiếp tục thực hiện thủ tục check-in cho khách.`,
+        onConfirm: () => setModal({ open: false, message: '', onConfirm: null, onCancel: null }),
+        onCancel: () => setModal({ open: false, message: '', onConfirm: null, onCancel: null })
+      });
+      resetWalkinForm();
+      setShowWalkinForm(false);
+      await fetchList();
+    } catch (error) {
+      setWalkinError(error.message || 'Không thể tạo đặt phòng');
+    } finally {
+      setWalkinLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!showWalkinForm) return;
+    if (hotels.length > 0) return;
+    let ignore = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/admin/hotels', { headers: { ...authHeaders() }, cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!ignore) setHotels(Array.isArray(data.items) ? data.items : []);
+      } catch (error) {
+        if (!ignore) setHotels([]);
+      }
+    })();
+    return () => { ignore = true; };
+  }, [showWalkinForm, hotels.length]);
+
+  useEffect(() => {
+    if (!showWalkinForm) return;
+    if (!walkinForm.hotelId) {
+      setRoomTypes([]);
+      return;
+    }
+    let ignore = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/room-types?hotelId=${walkinForm.hotelId}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const parsed = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+        if (!ignore) setRoomTypes(parsed);
+      } catch (error) {
+        if (!ignore) setRoomTypes([]);
+      }
+    })();
+    return () => { ignore = true; };
+  }, [showWalkinForm, walkinForm.hotelId]);
+
+  useEffect(() => {
+    if (!showWalkinForm) return;
+    if (!walkinForm.hotelId || !walkinForm.checkIn || !walkinForm.checkOut) {
+      setAvailableRooms([]);
+      return;
+    }
+    const cin = new Date(walkinForm.checkIn);
+    const cout = new Date(walkinForm.checkOut);
+    if (Number.isNaN(cin.getTime()) || Number.isNaN(cout.getTime()) || cout <= cin) {
+      setAvailableRooms([]);
+      return;
+    }
+    let ignore = false;
+    (async () => {
+      try {
+        const params = new URLSearchParams({
+          hotelId: String(walkinForm.hotelId),
+          checkIn: walkinForm.checkIn,
+          checkOut: walkinForm.checkOut
+        });
+        if (walkinForm.roomTypeId) params.append('roomTypeId', String(walkinForm.roomTypeId));
+        const res = await fetch(`/api/staff/available-rooms?${params.toString()}`, { headers: { ...authHeaders() }, cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!ignore) {
+          setAvailableRooms(items);
+          if (walkinForm.roomId && !items.some((room) => String(room.id) === String(walkinForm.roomId))) {
+            setWalkinForm((prev) => ({ ...prev, roomId: '' }));
+          }
+        }
+      } catch (error) {
+        if (!ignore) setAvailableRooms([]);
+      }
+    })();
+    return () => { ignore = true; };
+  }, [showWalkinForm, walkinForm.hotelId, walkinForm.roomTypeId, walkinForm.checkIn, walkinForm.checkOut, walkinForm.roomId]);
 
   const fetchList = async () => {
     setLoading(true); setErr('');
     try {
       const url = new URL('/api/admin/checkinout', window.location.origin);
-      if (!showAll && date) url.searchParams.set('date', toIso(date));
+      if (!showAll && date) url.searchParams.set('date', toIsoDate(date));
       if (q.trim()) url.searchParams.set('q', q.trim());
   const res = await fetch(url.toString(), { cache: 'no-store', headers: { ...authHeaders() } });
       if (!res.ok) {
@@ -226,8 +444,8 @@ Cần THỐI lại: ${refund.toLocaleString('vi-VN')} đ` : 'ĐÃ CHECK-OUT. Kh�
     const first = new Date(view.y, view.m, 1);
     const startDay = first.getDay();
     const daysInMonth = new Date(view.y, view.m + 1, 0).getDate();
-    const todayIso = toIso(new Date());
-    const selectedIso = date ? toIso(date) : '';
+    const todayIso = toIsoDate(new Date());
+    const selectedIso = date ? toIsoDate(date) : '';
     const cells = [];
     for (let i = 0; i < startDay; i++) cells.push(null);
     for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(view.y, view.m, d));
@@ -244,7 +462,7 @@ Cần THỐI lại: ${refund.toLocaleString('vi-VN')} đ` : 'ĐÃ CHECK-OUT. Kh�
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
           {cells.map((d, i) => {
             if (!d) return <div key={i} />;
-            const iso = toIso(d);
+            const iso = toIsoDate(d);
             const isToday = iso === todayIso;
             const isSel = iso === selectedIso;
             return (
@@ -294,6 +512,148 @@ Cần THỐI lại: ${refund.toLocaleString('vi-VN')} đ` : 'ĐÃ CHECK-OUT. Kh�
       )}
       <div className="ph-table" style={{ padding: 16 }}>
         <h2 className="home-rooms-title" style={{ textAlign: 'left', marginTop: 0 }}>Quản lý Check in - Check out</h2>
+        <div style={{ marginBottom: 16, background: '#fff', borderRadius: 12, boxShadow: '0 6px 18px rgba(15,23,42,0.08)', padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Đặt phòng tại quầy (khách trả tiền mặt)</div>
+            <button type="button" className="ph-btn" onClick={handleToggleWalkinForm}>
+              {showWalkinForm ? 'Đóng biểu mẫu' : '+ Đặt phòng mới'}
+            </button>
+          </div>
+          {showWalkinForm && (
+            <form onSubmit={handleCreateWalkin} style={{ marginTop: 14, display: 'grid', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Họ tên khách</span>
+                  <input
+                    className="ph-input"
+                    placeholder="Nguyễn Văn A"
+                    value={walkinForm.customerName}
+                    onChange={onWalkinFieldChange('customerName')}
+                    disabled={walkinLoading}
+                  />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Số điện thoại</span>
+                  <input
+                    className="ph-input"
+                    placeholder="0901 234 567"
+                    value={walkinForm.customerPhone}
+                    onChange={onWalkinFieldChange('customerPhone')}
+                    disabled={walkinLoading}
+                  />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Email (tuỳ chọn)</span>
+                  <input
+                    className="ph-input"
+                    placeholder="guest@example.com"
+                    value={walkinForm.customerEmail}
+                    onChange={onWalkinFieldChange('customerEmail')}
+                    disabled={walkinLoading}
+                  />
+                </label>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Khách sạn</span>
+                  <select
+                    className="ph-input"
+                    value={walkinForm.hotelId}
+                    onChange={onWalkinFieldChange('hotelId')}
+                    disabled={walkinLoading}
+                  >
+                    <option value="">-- Chọn khách sạn --</option>
+                    {hotels.map((h) => (
+                      <option key={h.id} value={h.id}>{h.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Hạng phòng</span>
+                  <select
+                    className="ph-input"
+                    value={walkinForm.roomTypeId}
+                    onChange={onWalkinFieldChange('roomTypeId')}
+                    disabled={walkinLoading || !walkinForm.hotelId}
+                  >
+                    <option value="">-- Tất cả hạng phòng --</option>
+                    {roomTypes.map((rt) => (
+                      <option key={rt.id} value={rt.id}>{rt.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Phòng trống</span>
+                  <select
+                    className="ph-input"
+                    value={walkinForm.roomId}
+                    onChange={onWalkinFieldChange('roomId')}
+                    disabled={walkinLoading || !availableRooms.length}
+                  >
+                    <option value="">-- Chọn phòng --</option>
+                    {availableRooms.map((room) => {
+                      const price = room.roomPrice != null ? room.roomPrice : room.basePrice;
+                      const label = `Phòng ${room.roomNumber}${room.roomTypeName ? ` • ${room.roomTypeName}` : ''} • ${Number(price || 0).toLocaleString('vi-VN')} đ/đêm`;
+                      return <option key={room.id} value={room.id}>{label}</option>;
+                    })}
+                  </select>
+                  {walkinForm.hotelId && !availableRooms.length && (
+                    <span style={{ fontSize: 12, color: '#b42318' }}>Không có phòng trống trong khoảng thời gian đã chọn.</span>
+                  )}
+                </label>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Ngày nhận phòng</span>
+                  <input
+                    type="date"
+                    className="ph-input"
+                    value={walkinForm.checkIn}
+                    onChange={onWalkinFieldChange('checkIn')}
+                    disabled={walkinLoading}
+                  />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Ngày trả phòng</span>
+                  <input
+                    type="date"
+                    className="ph-input"
+                    value={walkinForm.checkOut}
+                    onChange={onWalkinFieldChange('checkOut')}
+                    disabled={walkinLoading}
+                  />
+                </label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>Số khách</span>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <select
+                      className="ph-input"
+                      value={walkinForm.adults}
+                      onChange={onWalkinFieldChange('adults')}
+                      disabled={walkinLoading}
+                    >
+                      {[1,2,3,4,5,6].map((n) => <option key={n} value={n}>{n} NL</option>)}
+                    </select>
+                    <select
+                      className="ph-input"
+                      value={walkinForm.children}
+                      onChange={onWalkinFieldChange('children')}
+                      disabled={walkinLoading}
+                    >
+                      {[0,1,2,3,4].map((n) => <option key={n} value={n}>{n} TE</option>)}
+                    </select>
+                  </div>
+                </div>
+              </div>
+              {walkinError && <div style={{ color: '#b42318', fontSize: 13 }}>{walkinError}</div>}
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <button type="submit" className="ph-btn" disabled={walkinLoading}>
+                  {walkinLoading ? 'Đang tạo...' : 'Tạo đặt phòng & giữ phòng'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', alignItems: 'end', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
           <div style={{ display: 'flex', flexDirection: 'column' }}>
@@ -301,7 +661,7 @@ Cần THỐI lại: ${refund.toLocaleString('vi-VN')} đ` : 'ĐÃ CHECK-OUT. Kh�
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ position: 'relative' }}>
                 <input
-                  value={showAll ? '' : (date ? fmtDate(date) : '')}
+                  value={showAll ? '' : (date ? formatDisplayDate(date) : '')}
                   onChange={()=>{}}
                   placeholder="mm/dd/yyyy"
                   className="ph-input"
@@ -394,11 +754,11 @@ Cần THỐI lại: ${refund.toLocaleString('vi-VN')} đ` : 'ĐÃ CHECK-OUT. Kh�
                 </div>
               </div>
               <div className="success-grid invoice-grid">
-                <div className="label">Ngày lập</div><div className="value"><span className="invoice-date">{fmtDate(new Date())}</span></div>
+                <div className="label">Ngày lập</div><div className="value"><span className="invoice-date">{formatDisplayDate(new Date())}</span></div>
                 <div className="label">Khách hàng</div><div className="value">{invoice.customerName} ({invoice.phone||'—'})</div>
                 <div className="label">Phòng</div><div className="value">{invoice.roomNumber} — {invoice.roomType}</div>
-                <div className="label">Nhận phòng</div><div className="value">{fmtDate(invoice.checkIn)}</div>
-                <div className="label">Trả phòng</div><div className="value">{fmtDate(invoice.checkOut)}</div>
+                <div className="label">Nhận phòng</div><div className="value">{formatDisplayDate(invoice.checkIn)}</div>
+                <div className="label">Trả phòng</div><div className="value">{formatDisplayDate(invoice.checkOut)}</div>
                 <div className="label">Số đêm</div><div className="value">{invoice.nights}</div>
                 <div className="label">Đơn giá</div><div className="value">{Number(invoice.unitPrice||0).toLocaleString('vi-VN')} đ/đêm</div>
                 <div className="label">Thành tiền</div><div className="value bold">{Number(invoice.total||0).toLocaleString('vi-VN')} đ</div>
@@ -483,8 +843,8 @@ Cần THỐI lại: ${refund.toLocaleString('vi-VN')} đ` : 'ĐÃ CHECK-OUT. Kh�
                       <td>{it.phone || '—'}</td>
                       <td>{it.roomNumber || '—'}</td>
                       <td>{it.roomType || '—'}</td>
-                      <td>{fmtDate(it.checkIn)}</td>
-                      <td>{fmtDate(it.checkOut)}</td>
+                      <td>{formatDisplayDate(it.checkIn)}</td>
+                      <td>{formatDisplayDate(it.checkOut)}</td>
                       <td>
                         {it.status === 'pending' && <span className="ph-badge ph-badge--neutral">Chưa check-in</span>}
                         {it.status === 'checkedin' && <span className="ph-badge ph-badge--success">Đang sử dụng</span>}
