@@ -23,6 +23,7 @@ import AdminReports from './AdminReports';
 import AdminFeedback from './AdminFeedback';
 import NotificationsBell from './NotificationsBell';
 import AdminChatbotTraining from './AdminChatbotTraining';
+import LanguageSwitcher from './components/LanguageSwitcher';
 // Promotions feature removed
 
 const HomePage = () => {
@@ -559,7 +560,7 @@ const HomePage = () => {
           <img src="/icon-search.png" alt="Search" className="home-header-search-img" />
         </div>
         <div className="home-header-icons">
-          <span className="home-header-icon"><img src="/icon-language.png" alt="Language" className="home-header-icon-img" /></span>
+          <LanguageSwitcher />
           <NotificationsBell />
           <GridMenu
             onOpenHistory={() => { resetPrimaryViews(); setOpenHistory(true); }}
