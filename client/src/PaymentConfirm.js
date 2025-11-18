@@ -31,13 +31,17 @@ export default function PaymentPending() {
   const [initState, setInitState] = useState({ started:false, success:false, error:'', loading:false });
   const [serverPromo, setServerPromo] = useState(null);
   const [serverPromoError, setServerPromoError] = useState('');
+  const depositRate = 0.2;
   // Tính số tiền hiển thị ban đầu (có thể đang chứa mã cũ chưa revalidate)
   let initialFinalAmount = Number(amount||0);
+  let initialDepositFromStorage = null;
   try {
     const raw = localStorage.getItem('hmsBooking:'+token);
     if (raw) {
       const s = JSON.parse(raw);
-      if (s && s.promo && typeof s.promo.final !== 'undefined' && s.promo.final !== null) {
+      if (typeof s?.finalAmount === 'number') {
+        initialFinalAmount = Number(s.finalAmount);
+      } else if (s && s.promo && typeof s.promo.final !== 'undefined' && s.promo.final !== null) {
         initialFinalAmount = Number(s.promo.final || initialFinalAmount);
       } else if (s && s.promo && s.promo.code) {
         if (s.promo.discountValue && s.promo.discountType) {
@@ -50,9 +54,34 @@ export default function PaymentPending() {
           }
         }
       }
+      if (typeof s?.depositAmount === 'number') initialDepositFromStorage = Number(s.depositAmount);
     }
   } catch {}
-  const [computedAmount, setComputedAmount] = useState(initialFinalAmount);
+  const calcDeposit = (num) => {
+    const amountNum = Number(num) || 0;
+    return Math.max(0, Math.round(amountNum * depositRate));
+  };
+  const defaultDeposit = initialDepositFromStorage != null ? Number(initialDepositFromStorage) : calcDeposit(initialFinalAmount);
+  const [finalAmount, setFinalAmount] = useState(initialFinalAmount);
+  const [depositAmount, setDepositAmount] = useState(defaultDeposit);
+
+  const applyFinalAmount = (value) => {
+    const num = Number(value || 0);
+    if (Number.isNaN(num)) return;
+    const deposit = calcDeposit(num);
+    setFinalAmount(num);
+    setDepositAmount(deposit);
+    try {
+      const raw = localStorage.getItem('hmsBooking:'+token);
+      if (raw) {
+        const summary = JSON.parse(raw);
+        summary.finalAmount = num;
+        summary.amount = num;
+        summary.depositAmount = deposit;
+        localStorage.setItem('hmsBooking:'+token, JSON.stringify(summary));
+      }
+    } catch {}
+  };
 
   // Helper: drop promo from local storage & reset amount
   const dropPromo = (reasonMsg) => {
@@ -60,10 +89,14 @@ export default function PaymentPending() {
       const raw = localStorage.getItem('hmsBooking:'+token);
       if(raw){
         const s = JSON.parse(raw);
-        if(s.promo){ delete s.promo; localStorage.setItem('hmsBooking:'+token, JSON.stringify(s)); }
+        if(s.promo){ delete s.promo; }
+        s.finalAmount = Number(amount||0);
+        s.amount = Number(amount||0);
+        s.depositAmount = calcDeposit(Number(amount||0));
+        localStorage.setItem('hmsBooking:'+token, JSON.stringify(s));
       }
     } catch {}
-    setComputedAmount(Number(amount||0));
+    applyFinalAmount(Number(amount||0));
     if (reasonMsg) {
       showToast(reasonMsg, { type:'warning', duration: 3200 });
     }
@@ -99,17 +132,17 @@ export default function PaymentPending() {
               dropPromo('Mã ưu đãi đã bị gỡ (không áp dụng cho khách sạn/phòng này)');
             } else {
               // fallback: hiển thị số tiền gốc nếu validate thất bại
-              setComputedAmount(Number(amount||0));
+              applyFinalAmount(Number(amount||0));
             }
             return;
           }
           const body = await resp.json();
           // Removed debug log for promo validate response
             if (body && body.ok) {
-              if (typeof body.final === 'number') setComputedAmount(Number(body.final));
-              else if (typeof body.discount === 'number') setComputedAmount(Math.max(0, Number(amount||0) - Number(body.discount)));
+              if (typeof body.final === 'number') applyFinalAmount(Number(body.final));
+              else if (typeof body.discount === 'number') applyFinalAmount(Math.max(0, Number(amount||0) - Number(body.discount)));
             } else {
-              setComputedAmount(Number(amount||0));
+              applyFinalAmount(Number(amount||0));
             }
           setServerPromo(body);
           setServerPromoError('');
@@ -119,13 +152,13 @@ export default function PaymentPending() {
           // Provide a helpful message; in dev we include the error text
           setServerPromoError((err && err.message) ? ('Lỗi kiểm tra ưu đãi: ' + err.message) : 'Lỗi kiểm tra ưu đãi');
           setServerPromo(null);
-          setComputedAmount(Number(amount||0));
+          applyFinalAmount(Number(amount||0));
         }
       } catch (e) {
         if (!mounted) return;
         setServerPromoError('Lỗi kiểm tra ưu đãi');
         setServerPromo(null);
-        setComputedAmount(Number(amount||0));
+        applyFinalAmount(Number(amount||0));
       }
     })();
     return () => { mounted = false; };
@@ -157,21 +190,21 @@ export default function PaymentPending() {
             if (/khách sạn/i.test(msg) || /phòng đã chọn/i.test(msg) || /Thiếu phòng/i.test(msg)) {
               dropPromo('Đã gỡ mã ưu đãi không phù hợp');
             } else {
-              setComputedAmount(Number(amount||0));
+              applyFinalAmount(Number(amount||0));
             }
             return;
           }
       setServerPromo(body);
       setServerPromoError('');
       if (body && body.ok) {
-        if (typeof body.final === 'number') setComputedAmount(Number(body.final));
-        else if (typeof body.discount === 'number') setComputedAmount(Math.max(0, Number(amount||0) - Number(body.discount)));
-      } else setComputedAmount(Number(amount||0));
+        if (typeof body.final === 'number') applyFinalAmount(Number(body.final));
+        else if (typeof body.discount === 'number') applyFinalAmount(Math.max(0, Number(amount||0) - Number(body.discount)));
+      } else applyFinalAmount(Number(amount||0));
       return true;
     } catch (err) {
       setServerPromoError((err && err.message) ? ('Lỗi kiểm tra ưu đãi: ' + err.message) : 'Lỗi kiểm tra ưu đãi');
       setServerPromo(null);
-      setComputedAmount(Number(amount||0));
+      applyFinalAmount(Number(amount||0));
       return false;
     }
   };
@@ -227,11 +260,22 @@ export default function PaymentPending() {
       if(!resp.ok){ const t=await resp.text(); throw new Error('Tạo giao dịch lỗi: '+t); }
       let data = {};
       try { data = await resp.json(); } catch { data = {}; }
+      if (typeof data.finalTotal === 'number') applyFinalAmount(Number(data.finalTotal));
+      if (typeof data.depositTotal === 'number') setDepositAmount(Math.max(0, Math.round(Number(data.depositTotal))));
       const bookings = Array.isArray(data.bookings) ? data.bookings : [];
       // Lưu danh sách bookingIds vào summary để user có thể hủy nếu muốn
       try {
         const raw2 = localStorage.getItem('hmsBooking:'+token);
-        if(raw2){ const summary = JSON.parse(raw2); summary.bookingIds = bookings; localStorage.setItem('hmsBooking:'+token, JSON.stringify(summary)); }
+        if(raw2){
+          const summary = JSON.parse(raw2);
+          summary.bookingIds = bookings;
+          if (typeof data.finalTotal === 'number') {
+            summary.finalAmount = Number(data.finalTotal);
+            summary.amount = Number(data.finalTotal);
+          }
+          if (typeof data.depositTotal === 'number') summary.depositAmount = Number(data.depositTotal);
+          localStorage.setItem('hmsBooking:'+token, JSON.stringify(summary));
+        }
       } catch {}
       setInitState({ started:true, success:true, error:'', loading:false });
     } catch(e){ setInitState({ started:true, success:false, error:e.message||'Lỗi khởi tạo', loading:false }); }
@@ -241,17 +285,19 @@ export default function PaymentPending() {
     <div className="home-root" style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
       <div style={{ background:'#fff', border:'1px solid #e5e5e5', borderRadius:12, padding:24, maxWidth:560, width:'100%', textAlign:'center', boxShadow:'0 2px 10px rgba(0,0,0,0.06)' }}>
         <h1 style={{ marginTop:0 }}>Thanh toán chuyển khoản</h1>
-        <p style={{ marginTop:4 }}>Quét mã QR bên dưới để chuyển khoản đúng số tiền. Sau đó chờ quản trị viên xác nhận.</p>
+        <p style={{ marginTop:4 }}>Quét mã QR bên dưới để chuyển khoản số tiền đặt cọc 20% (tính trên tổng chi phí). Sau đó chờ quản trị viên xác nhận.</p>
         <div style={{ margin:'16px auto', width:240, height:240, borderRadius:16, overflow:'hidden', border:'1px solid #e2e8f0', display:'flex', alignItems:'center', justifyContent:'center', background:'#fafafa' }}>
           <img src="/qr-image.jpg" alt="QR thanh toán" style={{ width:'100%', height:'100%', objectFit:'cover' }} />
         </div>
           <div style={{ fontSize:13, background:'#f1f5f9', padding:12, borderRadius:8, textAlign:'left', lineHeight:1.5, display:'flex', flexDirection:'column', gap:8 }}>
-          <div><strong>Số tiền thanh toán:</strong> {computedAmount.toLocaleString('vi-VN')} VND</div>
+          <div><strong>Tổng chi phí (sau ưu đãi):</strong> {finalAmount.toLocaleString('vi-VN')} VND</div>
+          <div><strong>Tiền cọc phải chuyển (20%):</strong> {depositAmount.toLocaleString('vi-VN')} VND</div>
           {serverPromo && serverPromo.ok && (
             <div style={{ color:'#0f172a' }}>
               <div><strong>Mã ưu đãi áp dụng:</strong> {serverPromo.code}</div>
               <div><strong>Giảm giá:</strong> {Number(serverPromo.discount||0).toLocaleString('vi-VN')} VND</div>
-              <div style={{ fontWeight:700 }}><strong>Tổng sau giảm:</strong> {Number(serverPromo.final||computedAmount).toLocaleString('vi-VN')} VND</div>
+              <div style={{ fontWeight:700 }}><strong>Tổng sau giảm:</strong> {Number(serverPromo.final ?? finalAmount).toLocaleString('vi-VN')} VND</div>
+              <div><strong>Tiền cọc sau ưu đãi:</strong> {calcDeposit(serverPromo.final ?? finalAmount).toLocaleString('vi-VN')} VND</div>
             </div>
           )}
           {serverPromoError && (
@@ -334,20 +380,23 @@ function PendingBookings({ token }) {
   }, [token, reloadTick]);
 
   const cancelOne = async (bid) => {
-    if(!window.confirm('Hủy booking #' + bid + ' và hoàn 85%?')) return;
+    if(!window.confirm('Hủy booking #' + bid + ' và hoàn 85% tiền cọc?')) return;
     setBusy(bid);
     let email = '';
     try { const u = JSON.parse(localStorage.getItem('hmsUser')||'null'); email = u?.email||''; } catch {}
     try {
       const r = await fetch(`/api/payments/${bid}/cancel`, { method:'PUT', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ email }) });
       if(!r.ok){ const t=await r.text(); throw new Error(t); }
+      let j = null;
+      try { j = await r.json(); } catch { j = null; }
       // Cập nhật localStorage
       try {
         const raw = localStorage.getItem('hmsBooking:'+token);
         if(raw){ const s = JSON.parse(raw); s.bookingIds = (s.bookingIds||[]).filter(x=> x!==bid); localStorage.setItem('hmsBooking:'+token, JSON.stringify(s)); }
       } catch {}
       setList(ls=> ls.filter(x=> x!==bid));
-      showToast('Đã hủy booking #' + bid, { type: 'success', duration: 2200 });
+      const refundText = (j && typeof j.refundAmount === 'number') ? ` • Hoàn ${Number(j.refundAmount).toLocaleString('vi-VN')} VND tiền cọc` : '';
+      showToast('Đã hủy booking #' + bid + refundText, { type: 'success', duration: 2600 });
     } catch(e){ showToast(e.message||'Hủy thất bại', { type: 'error', duration: 2600 }); }
     finally { setBusy(null); }
   };

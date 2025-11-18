@@ -5,6 +5,8 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import { isLoggedIn } from './auth';
 
+const DEPOSIT_RATE = 0.2;
+
 export default function PaymentSuccess() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -22,13 +24,37 @@ export default function PaymentSuccess() {
   const summary = useMemo(() => {
     try {
       const raw = token ? localStorage.getItem('hmsBooking:' + token) : null;
-      if (raw) return JSON.parse(raw);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed) {
+          if (typeof parsed.depositAmount !== 'undefined') parsed.depositAmount = Number(parsed.depositAmount);
+          if (typeof parsed.finalAmount !== 'undefined') parsed.finalAmount = Number(parsed.finalAmount);
+        }
+        return parsed;
+      }
     } catch {}
     return {
       token, code, amount, roomType: rt, roomNames: rn, checkIn: ci, checkOut: co, adults: ad, children: ch, hotelId: (Number(params.get('hid')||0)||null),
-      hotel: '', checkInTime: '14:00', checkOutTime: '12:00'
+      hotel: '', checkInTime: '14:00', checkOutTime: '12:00', finalAmount: Number(amount || 0), depositAmount: Math.round(Number(amount || 0) * DEPOSIT_RATE)
     };
   }, [token, code, amount, rt, rn, ci, co, ad, ch, params]);
+
+  const finalTotal = useMemo(() => {
+    const rawTotal = typeof summary?.finalAmount === 'number' ? summary.finalAmount : Number(summary?.amount || amount || 0);
+    return Math.max(0, Math.round(rawTotal || 0));
+  }, [summary, amount]);
+
+  const depositPaid = useMemo(() => {
+    if (typeof summary?.depositAmount === 'number' && !Number.isNaN(summary.depositAmount)) {
+      return Math.max(0, Math.round(summary.depositAmount));
+    }
+    return Math.round(finalTotal * DEPOSIT_RATE);
+  }, [summary, finalTotal]);
+
+  const remainingBalance = useMemo(() => {
+    const remaining = Math.round(Number(finalTotal || 0) - Number(depositPaid || 0));
+    return remaining > 0 ? remaining : 0;
+  }, [finalTotal, depositPaid]);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,7 +88,7 @@ export default function PaymentSuccess() {
 
   const detailsHref = useMemo(() => {
     const q = new URLSearchParams({
-      amount: String(summary.amount || amount || 0),
+      amount: String(finalTotal || summary.amount || amount || 0),
       code: String(summary.code || code || ''),
       rn: String(summary.roomNames || rn || ''),
       rt: String(summary.roomType || rt || ''),
@@ -73,7 +99,7 @@ export default function PaymentSuccess() {
       hid: String(summary.hotelId || params.get('hid') || ''),
     });
     return `/booking/${token || summary.token || ''}?${q.toString()}`;
-  }, [summary, token, amount, code, rn, ci, co, ad, ch, params]);
+  }, [summary, token, amount, code, rn, ci, co, ad, ch, params, finalTotal]);
 
   const toBase64 = (buf) => {
     let binary = '';
@@ -136,9 +162,14 @@ export default function PaymentSuccess() {
           <div style="color:#666;font-weight:700;">Khách</div>
           <div style="font-weight:800;">${summary.adults || 0} người lớn${summary.children ? ` • ${summary.children} trẻ em` : ''}</div>
           <div style="color:#666;font-weight:700;">Tổng cộng</div>
-          <div style="font-weight:800;">${Number(summary.amount || 0).toLocaleString('vi-VN')} VND</div>
+          <div style="font-weight:800;">${Number(finalTotal || 0).toLocaleString('vi-VN')} VND</div>
+          <div style="color:#666;font-weight:700;">Đặt cọc đã thanh toán</div>
+          <div style="font-weight:800;">${Number(depositPaid || 0).toLocaleString('vi-VN')} VND</div>
+          <div style="color:#666;font-weight:700;">Còn lại</div>
+          <div style="font-weight:800;">${Number(remainingBalance || 0).toLocaleString('vi-VN')} VND</div>
         </div>
-        <div style="margin-top:10px;font-weight:800;">(ĐÃ THANH TOÁN)</div>
+        <div style="margin-top:10px;font-weight:800;">(ĐÃ THANH TOÁN ĐẶT CỌC 20%)</div>
+        <div style="margin-top:8px;font-size:12;color:#475569;">Vui lòng thanh toán phần còn lại khi nhận phòng.</div>
       </div>`;
     document.body.appendChild(container);
     try {
@@ -214,7 +245,7 @@ export default function PaymentSuccess() {
           <img src="/success.png" alt="success" />
         </div>
         <h2 className="success-title">Thanh Toán Thành Công!</h2>
-        <div className="success-sub">Cảm ơn bạn đã đặt phòng tại HMS Hotel.</div>
+          <div className="success-sub">Cảm ơn bạn đã đặt phòng tại HMS Hotel. Bạn đã thanh toán trước 20% giá trị đơn đặt phòng.</div>
   <div className="success-code-line"><span className="label">Mã Đặt Phòng</span><span className="value">{summary.code || token}</span></div>
         <div className="success-sep" />
         <div className="success-grid">
@@ -224,9 +255,12 @@ export default function PaymentSuccess() {
           <div className="label">Hạng Phòng</div><div className="value">{summary.roomType || '—'}</div>
           <div className="label">Phòng</div><div className="value wrap">{summary.roomNames || summary.roomType}</div>
           <div className="label">Khách</div><div className="value">{summary.adults || 0} người lớn{summary.children ? ` • ${summary.children} trẻ em` : ''}</div>
-          <div className="label">Tổng Cộng</div><div className="value bold nowrap">{Number(summary.amount || 0).toLocaleString('vi-VN')} VND</div>
+          <div className="label">Tổng Cộng</div><div className="value bold nowrap">{Number(finalTotal || 0).toLocaleString('vi-VN')} VND</div>
+          <div className="label">Đã Thanh Toán</div><div className="value bold nowrap">{Number(depositPaid || 0).toLocaleString('vi-VN')} VND</div>
+          <div className="label">Còn Lại</div><div className="value bold nowrap">{Number(remainingBalance || 0).toLocaleString('vi-VN')} VND</div>
         </div>
-        <div className="success-paid">(ĐÃ THANH TOÁN)</div>
+        <div className="success-paid">(ĐÃ THANH TOÁN ĐẶT CỌC 20%)</div>
+        <div style={{ marginTop:8, fontSize:12, color:'#475569' }}>Vui lòng thanh toán phần còn lại khi nhận phòng.</div>
         <div className="success-actions">
           <button className="checkout-btn success-btn" onClick={printReceipt}>Tải phiếu xác nhận (PDF)</button>
         </div>

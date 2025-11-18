@@ -26,7 +26,7 @@ export default function BookingDetails() {
     } catch {}
     return {
       token, code, amount, roomNames: rn, roomType: rt, checkIn: ci, checkOut: co, adults: ad, children: ch, hotelId: hid,
-      hotel: '', checkInTime: '14:00', checkOutTime: '12:00', rooms: []
+      hotel: '', checkInTime: '14:00', checkOutTime: '12:00', rooms: [], depositAmount: Math.round(Number(amount || 0) * 0.2), finalAmount: Number(amount || 0)
     };
   }, [token, amount, code, rn, ci, co, ad, ch, hid]);
 
@@ -47,6 +47,18 @@ export default function BookingDetails() {
     const pCode = summary && summary.promo && summary.promo.code ? summary.promo.code : null;
     return { grossAmount: gross, finalAmount: final, discountValue: discount, discountPercent: percent, promoCode: pCode };
   }, [summary]);
+
+  const depositAmount = useMemo(() => {
+    if (typeof summary?.depositAmount === 'number' && !Number.isNaN(summary.depositAmount)) {
+      return Math.max(0, Math.round(Number(summary.depositAmount)));
+    }
+    return Math.max(0, Math.round(finalAmount * 0.2));
+  }, [summary, finalAmount]);
+
+  const remainingAmount = useMemo(() => {
+    const remain = Math.round(finalAmount - depositAmount);
+    return remain > 0 ? remain : 0;
+  }, [finalAmount, depositAmount]);
 
   // Intentionally no hotel fetch: hotel name shows only in receipt
   useEffect(() => {
@@ -98,6 +110,8 @@ export default function BookingDetails() {
           ) : (
             <div style={{ marginBottom: 8 }}><b>Tổng cộng:</b> {grossAmount.toLocaleString('vi-VN')} VND</div>
           )}
+          <div style={{ marginBottom: 8 }}><b>Đã đặt cọc:</b> {depositAmount.toLocaleString('vi-VN')} VND</div>
+          <div style={{ marginBottom: 8 }}><b>Còn lại thanh toán tại khách sạn:</b> {remainingAmount.toLocaleString('vi-VN')} VND</div>
           {Array.isArray(summary.rooms) && summary.rooms.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>Danh sách phòng:</div>

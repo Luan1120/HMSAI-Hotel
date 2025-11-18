@@ -165,6 +165,12 @@ function normalizeServiceIcon(p) {
   return v;
 }
 
+function roundCurrency(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.round(num * 100) / 100;
+}
+
 // ===== Chatbot training dataset helpers =====
 const trainingDataPath = path.join(__dirname, 'chatbot_training.json');
 
@@ -1005,19 +1011,34 @@ app.get('/api/transactions', async (req, res) => {
         CONCAT(b.Adults, ' NL', CASE WHEN b.Children IS NULL OR b.Children=0 THEN '' ELSE ' + ' + CAST(b.Children AS NVARCHAR(10)) + ' TE' END) AS Guests,
         rt.BasePrice AS PricePerNight,
         b.TotalAmount,
-        CASE WHEN b.PaymentStatus IN (N'Đã thanh toán', N'Da thanh toan') THEN 'paid'
+           CASE WHEN b.PaymentStatus IN (N'Đã thanh toán', N'Da thanh toan') THEN 'paid'
              WHEN b.PaymentStatus IN (N'Hủy', N'Huy') THEN 'canceled'
              ELSE 'pending' END AS PaymentStatus,
-        p.CreatedAt AS PaidAt,
-        p.Method
+           pay.LatestPaymentAt AS PaidAt,
+             payMethod.LatestMethod AS Method,
+           pay.DepositAmount,
+           pay.RefundedAmount,
+           pay.RefundStatus
       FROM Bookings b
       INNER JOIN Users u ON u.Id = b.UserId
       INNER JOIN Hotels h ON h.Id = b.HotelId
       INNER JOIN Room_Types rt ON rt.Id = b.RoomTypeId
       LEFT JOIN Rooms ro ON ro.Id = b.RoomId
       OUTER APPLY (
-        SELECT TOP 1 CreatedAt, Method FROM Payments p WHERE p.BookingId = b.Id ORDER BY CreatedAt DESC
-      ) p
+        SELECT
+          SUM(CAST(CASE WHEN Status NOT LIKE 'Refunded%' THEN Amount ELSE 0 END AS DECIMAL(18,2))) AS DepositAmount,
+          SUM(CAST(CASE WHEN Status LIKE 'Refunded%' THEN Amount ELSE 0 END AS DECIMAL(18,2))) AS RefundedAmount,
+          MAX(CASE WHEN Status LIKE 'Refunded%' THEN Status ELSE NULL END) AS RefundStatus,
+          MAX(CASE WHEN Status NOT LIKE 'Refunded%' THEN CreatedAt ELSE NULL END) AS LatestPaymentAt
+        FROM Payments p
+        WHERE p.BookingId = b.Id
+      ) pay
+      OUTER APPLY (
+        SELECT TOP 1 Method AS LatestMethod
+        FROM Payments p2
+        WHERE p2.BookingId = b.Id AND p2.Status NOT LIKE 'Refunded%'
+        ORDER BY p2.CreatedAt DESC, p2.Id DESC
+      ) payMethod
       WHERE u.Email = @email
         ${dateFilter}
         ${q ? ' AND (h.Name LIKE @q OR rt.Name LIKE @q OR CAST(b.Id AS NVARCHAR(20)) LIKE @q OR ro.RoomNumber LIKE @q)' : ''}
@@ -1038,7 +1059,10 @@ app.get('/api/transactions', async (req, res) => {
       total: r.TotalAmount,
       paymentStatus: r.PaymentStatus,
       paidAt: r.PaidAt,
-      method: r.Method
+      method: r.Method,
+      depositAmount: Number(r.DepositAmount || 0),
+      refundAmount: Number(r.RefundedAmount || 0),
+      refundStatus: r.RefundStatus || null
     }));
     res.json({ items });
   } catch (err) {
@@ -2604,6 +2628,37 @@ app.post('/api/payments/complete', async (req, res) => {
     if (discountTotal < 0) discountTotal = 0;
     if (discountTotal > grossTotal) discountTotal = grossTotal;
     const finalAllNet = Math.max(0, Math.round(grossTotal - discountTotal));
+    const depositRate = 0.2;
+    const depositBase = finalAllNet > 0 ? finalAllNet : grossTotal;
+    const targetDepositTotal = roundCurrency(depositBase * depositRate);
+    const activeRows = rowsData.filter(x => x.roomRow);
+    const activeRowCount = activeRows.length;
+    const depositAllocations = [];
+    let remainingDeposit = targetDepositTotal;
+    let processedActive = 0;
+
+    for (const rd of rowsData) {
+      if (!rd.roomRow) {
+        depositAllocations.push(0);
+        continue;
+      }
+      processedActive += 1;
+      if (targetDepositTotal <= 0) {
+        depositAllocations.push(0);
+        continue;
+      }
+      let shareAmount = 0;
+      if (processedActive === activeRowCount) {
+        shareAmount = remainingDeposit;
+      } else {
+        const share = grossTotal > 0 ? (rd.amount || 0) / grossTotal : 0;
+        shareAmount = roundCurrency(targetDepositTotal * share);
+        if (shareAmount > remainingDeposit) shareAmount = remainingDeposit;
+      }
+      shareAmount = Math.max(0, roundCurrency(shareAmount));
+      depositAllocations.push(shareAmount);
+      remainingDeposit = roundCurrency(remainingDeposit - shareAmount);
+    }
 
     // ===== REVERT MODE (A1): Per yêu cầu người dùng: lưu GIÁ GỐC vào DB, KHÔNG lưu số tiền đã giảm =====
     // Lý do: Người dùng muốn "hoàn tác" việc ghi số tiền sau giảm vào Bookings.TotalAmount.
@@ -2612,9 +2667,11 @@ app.post('/api/payments/complete', async (req, res) => {
     // Cảnh báo: Sau thay đổi này, dữ liệu DB sẽ không phản ánh doanh thu sau giảm giá (mất khả năng phân tích chính xác giảm giá).
 
     // Second pass: insert bookings with both stored amounts = gross (net bỏ qua) theo revert A1.
-    for (const rd of rowsData) {
+    for (let idx = 0; idx < rowsData.length; idx += 1) {
+      const rd = rowsData[idx];
       if (rd.skipExistingBookingId) { created.push(rd.skipExistingBookingId); continue; }
       const row = rd.roomRow; const reqRoom = rd.requested; const gross = rd.amount || 0;
+      const depositAmount = roundCurrency(depositAllocations[idx] || 0);
       const requestBooking = pool.request()
         .input('userId', sql.Int, userId)
         .input('hotelId', sql.Int, row.HotelId)
@@ -2638,17 +2695,19 @@ app.post('/api/payments/complete', async (req, res) => {
           VALUES (@userId, @hotelId, @roomTypeId, @roomId, @checkIn, @checkOut, @adults, @children, @status, @totalAmount, @paymentStatus)`;
       const b = await requestBooking.query(insertSql);
       const bookingId = b.recordset[0].Id;
-      // Payment row matches net
-      await pool.request()
-        .input('bookingId', sql.Int, bookingId)
-        .input('userId', sql.Int, userId)
-        .input('amount', sql.Decimal(10,2), gross) // reverted: payment amount = gross
-        .input('method', sql.NVarChar(30), method || 'Unknown')
-        .input('status', sql.NVarChar(20), 'Pending')
-        .input('orderId', sql.NVarChar(50), token || null)
-        .query(`IF NOT EXISTS (SELECT 1 FROM Payments WHERE OrderId = @orderId AND BookingId=@bookingId)
-                INSERT INTO Payments (BookingId, UserId, Amount, Method, Status, OrderId)
-                VALUES (@bookingId, @userId, @amount, @method, @status, @orderId)`);
+      // Payment row reflects deposit (20% of final payable amount)
+      if (depositAmount > 0) {
+        await pool.request()
+          .input('bookingId', sql.Int, bookingId)
+          .input('userId', sql.Int, userId)
+          .input('amount', sql.Decimal(10,2), depositAmount)
+          .input('method', sql.NVarChar(30), method || 'Unknown')
+          .input('status', sql.NVarChar(20), 'Pending')
+          .input('orderId', sql.NVarChar(50), token || null)
+          .query(`IF NOT EXISTS (SELECT 1 FROM Payments WHERE OrderId = @orderId AND BookingId=@bookingId)
+                  INSERT INTO Payments (BookingId, UserId, Amount, Method, Status, OrderId)
+                  VALUES (@bookingId, @userId, @amount, @method, @status, @orderId)`);
+      }
       created.push(bookingId);
 
       // Notifications
@@ -2665,7 +2724,7 @@ app.post('/api/payments/complete', async (req, res) => {
       } catch (e) { /* ignore user notif */ }
     }
 
-    res.json({ ok: true, bookings: created, status: 'Pending', grossTotal, discountTotal, finalTotal: finalAllNet, promo });
+    res.json({ ok: true, bookings: created, status: 'Pending', grossTotal, discountTotal, finalTotal: finalAllNet, depositRate, depositTotal: targetDepositTotal, promo });
   } catch (err) {
     console.error('complete payment error:', err);
     res.status(500).json({ message: 'Lỗi máy chủ khi lưu giao dịch' });
@@ -2692,17 +2751,12 @@ app.put('/api/payments/:bookingId/confirm', authorize(['Admin']), async (req, re
     // Mark payments paid (keeping their recorded amounts which equal net)
     await pool.request().input('id', sql.Int, bookingId)
       .query(`UPDATE Payments SET Status='Paid' WHERE BookingId=@id`);
-    // Optional verification: sum payments must equal stored TotalAmount (tolerate minor rounding)
+    let depositSum = 0;
     try {
-      const sumRs = await pool.request().input('id', sql.Int, bookingId).query('SELECT SUM(CAST(Amount AS DECIMAL(18,2))) AS S FROM Payments WHERE BookingId=@id');
-      const sum = Number(sumRs.recordset?.[0]?.S || 0);
-      const stored = Number(bRow.TotalAmount || 0);
-      if (sum > 0 && Math.abs(sum - stored) >= 1) {
-        // If difference significant, align booking to sum (still net) – rare fallback
-        await pool.request().input('id', sql.Int, bookingId).input('amt', sql.Decimal(10, 2), sum)
-          .query('UPDATE Bookings SET TotalAmount=@amt WHERE Id=@id');
-      }
-    } catch { /* ignore consistency adjustments */ }
+      const sumRs = await pool.request().input('id', sql.Int, bookingId)
+        .query("SELECT SUM(CAST(CASE WHEN Status <> 'Canceled' THEN Amount ELSE 0 END AS DECIMAL(18,2))) AS S FROM Payments WHERE BookingId=@id");
+      depositSum = Number(sumRs.recordset?.[0]?.S || 0);
+    } catch { depositSum = 0; }
     // Notify customer
     try {
       if (bRow.UserId) {
@@ -2710,7 +2764,7 @@ app.put('/api/payments/:bookingId/confirm', authorize(['Admin']), async (req, re
         await insertNotification(pool, bRow.UserId, 'BookingConfirmed', 'Thanh toán đã xác nhận', `Booking ${code} đã được xác nhận thanh toán.`);
       }
     } catch (e) { /* ignore notif */ }
-    res.json({ ok: true, message: 'Đã xác nhận thanh toán', bookingId, finalAmount: Number(bRow.TotalAmount || 0) });
+    res.json({ ok: true, message: 'Đã xác nhận thanh toán', bookingId, finalAmount: Number(bRow.TotalAmount || 0), depositAmount: roundCurrency(depositSum) });
   } catch (e) {
     console.error('confirm payment error', e);
     res.status(500).json({ message: 'Lỗi máy chủ khi xác nhận thanh toán' });
@@ -2735,14 +2789,38 @@ app.put('/api/payments/:bookingId/cancel', async (req, res) => {
     const pStat = String(bRow.PaymentStatus || '').toLowerCase();
     if (pStat.includes('đã') || pStat.includes('da') || pStat.includes('paid')) return res.status(400).json({ message: 'Đã thanh toán - không thể hủy' });
     if (pStat.includes('huy')) return res.status(400).json({ message: 'Đã hủy trước đó' });
-    const total = Number(bRow.TotalAmount || 0);
-    const cancellationFee = +(total * 0.15).toFixed(2);
-    const refundAmount = +(total - cancellationFee).toFixed(2);
+    const payRs = await pool.request().input('id', sql.Int, bookingId)
+      .query("SELECT Amount, Status FROM Payments WHERE BookingId=@id");
+    const depositSum = roundCurrency((payRs.recordset || []).reduce((acc, row) => {
+      const status = (row.Status || '').toLowerCase();
+      if (status === 'canceled') return acc;
+      return acc + Number(row.Amount || 0);
+    }, 0));
+    const fallbackDeposit = roundCurrency(Number(bRow.TotalAmount || 0) * 0.2);
+    const depositBase = depositSum > 0 ? depositSum : fallbackDeposit;
+    if (!(depositBase > 0)) return res.status(400).json({ message: 'Không tìm thấy tiền cọc để hoàn' });
+    const cancellationFee = roundCurrency(depositBase * 0.15);
+    const refundAmount = roundCurrency(depositBase - cancellationFee);
     await pool.request().input('id', sql.Int, bookingId)
       .query("UPDATE Bookings SET PaymentStatus=N'Hủy', Status='Canceled' WHERE Id=@id");
     await pool.request().input('id', sql.Int, bookingId)
       .query("UPDATE Payments SET Status='Canceled' WHERE BookingId=@id");
-    res.json({ ok: true, bookingId, refundAmount, cancellationFee, message: 'Đã hủy - hoàn 85%' });
+    if (refundAmount > 0) {
+      const existRefund = await pool.request().input('id', sql.Int, bookingId)
+        .query("SELECT TOP 1 Id FROM Payments WHERE BookingId=@id AND Status LIKE 'Refunded%'");
+      if (!existRefund.recordset.length) {
+        await pool.request()
+          .input('bookingId', sql.Int, bookingId)
+          .input('userId', sql.Int, userId)
+          .input('amount', sql.Decimal(10, 2), refundAmount)
+          .input('method', sql.NVarChar(30), 'UserRefund')
+          .input('status', sql.NVarChar(20), 'RefundedUser')
+          .input('orderId', sql.NVarChar(50), `REF-USER-${bookingId}-${Date.now()}`)
+          .query(`INSERT INTO Payments (BookingId, UserId, Amount, Method, Status, OrderId)
+                  VALUES (@bookingId, @userId, @amount, @method, @status, @orderId)`);
+      }
+    }
+    res.json({ ok: true, bookingId, refundAmount, cancellationFee, depositAmount: depositBase, message: 'Đã hủy - hoàn 85% tiền cọc', refundStatus: 'RefundedUser' });
   } catch (e) {
     console.error('cancel payment error', e);
     res.status(500).json({ message: 'Lỗi máy chủ khi hủy thanh toán' });
@@ -2764,11 +2842,35 @@ app.put('/api/payments/:bookingId/admin-cancel', authorize(['Admin']), async (re
       return res.status(400).json({ message: 'Booking đã thanh toán - không thể hủy admin-cancel kiểu hoàn 100%' });
     }
     if (payStat.includes('huy')) return res.status(400).json({ message: 'Đã hủy trước đó' });
+    const payRs = await pool.request().input('id', sql.Int, bookingId)
+      .query("SELECT Amount, Status FROM Payments WHERE BookingId=@id");
+    const depositSum = roundCurrency((payRs.recordset || []).reduce((acc, row) => {
+      const status = (row.Status || '').toLowerCase();
+      if (status === 'canceled') return acc;
+      return acc + Number(row.Amount || 0);
+    }, 0));
+    const fallbackDeposit = roundCurrency(Number(row.TotalAmount || 0) * 0.2);
+    const refundAmount = depositSum > 0 ? depositSum : fallbackDeposit;
     // Update booking + payment (100% refund conceptually -> just set canceled)
     await pool.request().input('id', sql.Int, bookingId)
-      .query("UPDATE Bookings SET Status = N'Hủy', UpdatedAt = SYSDATETIME() WHERE Id = @id");
+      .query("UPDATE Bookings SET Status = 'Canceled', PaymentStatus = N'Hủy', UpdatedAt = SYSDATETIME() WHERE Id = @id");
     await pool.request().input('id', sql.Int, bookingId)
       .query("UPDATE Payments SET Status='Canceled' WHERE BookingId=@id");
+    if (refundAmount > 0 && row.UserId) {
+      const existRefund = await pool.request().input('id', sql.Int, bookingId)
+        .query("SELECT TOP 1 Id FROM Payments WHERE BookingId=@id AND Status LIKE 'Refunded%'");
+      if (!existRefund.recordset.length) {
+        await pool.request()
+          .input('bookingId', sql.Int, bookingId)
+          .input('userId', sql.Int, row.UserId)
+          .input('amount', sql.Decimal(10, 2), refundAmount)
+          .input('method', sql.NVarChar(30), 'AdminRefund')
+          .input('status', sql.NVarChar(20), 'RefundedAdmin')
+          .input('orderId', sql.NVarChar(50), `REF-ADMIN-${bookingId}-${Date.now()}`)
+          .query(`INSERT INTO Payments (BookingId, UserId, Amount, Method, Status, OrderId)
+                  VALUES (@bookingId, @userId, @amount, @method, @status, @orderId)`);
+      }
+    }
     // Notify customer
     try {
       if (row.UserId) {
@@ -2776,7 +2878,7 @@ app.put('/api/payments/:bookingId/admin-cancel', authorize(['Admin']), async (re
         await insertNotification(pool, row.UserId, 'BookingCancelled', 'Đơn đặt phòng đã bị hủy', `Booking ${code} đã bị quản trị hủy. Bạn sẽ được hoàn 100% số tiền đã thanh toán (nếu có).`);
       }
     } catch (e) { console.warn('notify customer admin cancel warn', e.message); }
-    res.json({ ok: true, message: 'Đã hủy và hoàn 100%', refundAmount: Number(row.TotalAmount || 0) });
+    res.json({ ok: true, message: 'Đã hủy và hoàn 100% tiền cọc', refundAmount, depositAmount: refundAmount, cancellationFee: 0, refundStatus: 'RefundedAdmin' });
   } catch (e) {
     console.error('admin cancel booking error', e);
     res.status(500).json({ message: 'Lỗi máy chủ khi admin hủy booking' });
@@ -3359,12 +3461,31 @@ app.post('/api/admin/reviews/:id/reply', authorize(['Admin']), async (req, res) 
 
 // ===== Admin: Bookings Management =====
 // Map database payment/status combos into UI keys
+function normalizeForCompare(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
 function mapBookingStatus(row) {
-  const ps = String(row.PaymentStatus || '').toLowerCase();
-  const bs = String(row.Status || '').toLowerCase();
+  const psRaw = String(row.PaymentStatus || '');
+  const bsRaw = String(row.Status || '');
+  const ps = psRaw.toLowerCase();
+  const bs = bsRaw.toLowerCase();
+  const psAscii = normalizeForCompare(psRaw);
+  const bsAscii = normalizeForCompare(bsRaw);
   // NEW LOGIC:
   // 1. Cancellation has highest priority
-  if (ps.includes('hủy') || ps.includes('huy') || bs.includes('cancel')) return 'canceled';
+  if (
+    ps.includes('hủy') || ps.includes('huy') ||
+    bs.includes('hủy') || bs.includes('huy') ||
+    psAscii.includes('huy') ||
+    bsAscii.includes('huy') ||
+    bsAscii.includes('cancel')
+  ) {
+    return 'canceled';
+  }
   // 2. Explicit pending indicators
   if (ps.includes('chờ') || ps.includes('cho') || ps.includes('pending')) return 'pending';
   // 3. If booking status shows confirmed/booked but payment not yet marked paid -> 'confirmed'

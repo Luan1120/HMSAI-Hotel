@@ -45,31 +45,65 @@ export default function PaymentHistory({ inline = false, onReview }) {
       const res = await fetch(url.toString());
       if (!res.ok) throw new Error('Không tải được dữ liệu');
       const j = await res.json();
-      let raw = Array.isArray(j.items)? j.items: [];
-      // Rehydrate refund info for canceled bookings (if server omitted it)
+      const rawItems = j && Array.isArray(j.items) ? j.items : [];
+      let raw = rawItems.map(it => ({ ...it }));
+      // Rehydrate refund info for canceled bookings (prefer server data)
       raw = raw.map(it => {
-        if(it.paymentStatus === 'canceled') {
-          if(it.refundAmount == null) {
-            // Try localStorage cache first
-            try {
-              const cache = localStorage.getItem('refund:'+it.bookingId);
-              if(cache) {
-                const parsed = JSON.parse(cache);
-                if(parsed && typeof parsed.refundAmount !== 'undefined') {
-                  return { ...it, refundAmount: parsed.refundAmount, cancellationFee: parsed.cancellationFee };
-                }
+        const paymentStatus = String(it.paymentStatus || '').toLowerCase();
+        const refundStatus = String(it.refundStatus || '');
+        const depositFromServer = Math.round(Number(it.depositAmount || 0));
+        const refundFromServer = Math.round(Number(it.refundAmount || 0));
+        const base = {
+          ...it,
+          depositAmount: depositFromServer,
+          refundAmount: refundFromServer > 0 ? refundFromServer : null,
+          refundStatus
+        };
+
+        if (paymentStatus === 'canceled') {
+          let depositBase = depositFromServer;
+          if (!(depositBase > 0)) {
+            const totalFallback = Math.round(Number(it.total || 0) * 0.2);
+            if (totalFallback > 0) depositBase = totalFallback;
+          }
+
+          if (refundFromServer > 0) {
+            const cancellationFee = depositBase > 0 ? Math.max(0, depositBase - refundFromServer) : 0;
+            const cancellationSource = refundStatus.toLowerCase().includes('admin') ? 'admin' : 'user';
+            return { ...base, depositAmount: depositBase, refundAmount: refundFromServer, cancellationFee, cancellationSource };
+          }
+
+          // Server lacks refund info — try cached client data
+          try {
+            const cache = localStorage.getItem('refund:' + it.bookingId);
+            if (cache) {
+              const parsed = JSON.parse(cache);
+              if (parsed && typeof parsed.refundAmount !== 'undefined') {
+                const refundAmount = Math.round(Number(parsed.refundAmount || 0));
+                const cancellationFee = depositBase > 0 ? Math.max(0, depositBase - refundAmount) : Number(parsed.cancellationFee || 0);
+                const depositVal = parsed.depositAmount != null ? Math.round(Number(parsed.depositAmount || 0)) : depositBase;
+                return { ...base, refundAmount, cancellationFee, depositAmount: depositVal, cancellationSource: parsed.cancellationSource || 'user' };
               }
-            } catch {}
-            // Fallback compute (85% refund, 15% fee) based on total if available
-            const total = Number(it.total)||0;
-            if(total>0) {
-              const refundAmount = Math.round(total * 0.85);
-              const cancellationFee = total - refundAmount;
-              return { ...it, refundAmount, cancellationFee };
             }
+          } catch {}
+
+          if (depositBase > 0) {
+            // Default user-cancel assumption: refund 85%, keep 15%
+            const refundAmount = Math.round(depositBase * 0.85);
+            const cancellationFee = depositBase - refundAmount;
+            return { ...base, depositAmount: depositBase, refundAmount, cancellationFee, cancellationSource: 'user' };
+          }
+
+          const total = Number(it.total) || 0;
+          if (total > 0) {
+            const fallbackDeposit = Math.round(total * 0.2);
+            const refundAmount = Math.round(fallbackDeposit * 0.85);
+            const cancellationFee = fallbackDeposit - refundAmount;
+            return { ...base, refundAmount, cancellationFee, depositAmount: fallbackDeposit, cancellationSource: 'user' };
           }
         }
-        return it;
+
+        return base;
       });
       setItems(raw);
     } catch (e) { setError(e.message || 'Lỗi tải dữ liệu'); }
@@ -226,7 +260,7 @@ export default function PaymentHistory({ inline = false, onReview }) {
                     )}
                     {it.paymentStatus==='pending' && (
                       <button type="button" className="ph-action-btn ph-action-danger" onClick={async()=>{
-                        if(!window.confirm('Hủy giao dịch này? Hoàn 85%, phí 15%.')) return;
+                        if(!window.confirm('Hủy giao dịch này? Hoàn 85% tiền cọc, giữ 15% phí.')) return;
                         try {
                           const uRaw = localStorage.getItem('hmsUser');
                           const email = uRaw? JSON.parse(uRaw).email: null;
@@ -234,13 +268,21 @@ export default function PaymentHistory({ inline = false, onReview }) {
                           const r = await fetch(`/api/payments/${it.bookingId}/cancel`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email }) });
                           if(!r.ok){ const t=await r.text(); throw new Error(t); }
                           const j = await r.json();
-                          setItems(list => list.map(x => x.bookingId===it.bookingId ? { ...x, paymentStatus:'canceled', refundAmount:j.refundAmount, cancellationFee:j.cancellationFee } : x));
-                          try { localStorage.setItem('refund:'+it.bookingId, JSON.stringify({ refundAmount:j.refundAmount, cancellationFee:j.cancellationFee })); } catch {}
+                          setItems(list => list.map(x => x.bookingId===it.bookingId ? { ...x, paymentStatus:'canceled', refundAmount:j.refundAmount, cancellationFee:j.cancellationFee, depositAmount:j.depositAmount != null ? j.depositAmount : x.depositAmount } : x));
+                          try { localStorage.setItem('refund:'+it.bookingId, JSON.stringify({ refundAmount:j.refundAmount, cancellationFee:j.cancellationFee, depositAmount:j.depositAmount, cancellationSource: 'user' })); } catch {}
                         } catch(e){ alert(e.message||'Hủy thất bại'); }
                       }}>HỦY</button>
                     )}
-                    {it.paymentStatus==='canceled' && (it.refundAmount!=null) && (
-                      <div className="ph-action-refund">Hoàn: {Number(it.refundAmount).toLocaleString('vi-VN')} VND</div>
+                    {it.paymentStatus==='canceled' && (
+                      <div className="ph-action-refund">
+                        Hoàn: {Number(it.refundAmount || 0).toLocaleString('vi-VN')} VND
+                        {it.cancellationFee != null && (
+                          <span> · Phí giữ lại: {Number(it.cancellationFee).toLocaleString('vi-VN')} VND</span>
+                        )}
+                        {it.depositAmount != null && (
+                          <span> · Cọc: {Number(it.depositAmount).toLocaleString('vi-VN')} VND</span>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
