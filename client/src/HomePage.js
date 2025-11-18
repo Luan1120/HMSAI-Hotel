@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import RoomTypeInline from './RoomTypeInline';
 import RoomsBrowse from './RoomsBrowse';
@@ -22,6 +22,7 @@ import showToast from './toast';
 import AdminReports from './AdminReports';
 import AdminFeedback from './AdminFeedback';
 import NotificationsBell from './NotificationsBell';
+import AdminChatbotTraining from './AdminChatbotTraining';
 // Promotions feature removed
 
 const HomePage = () => {
@@ -40,6 +41,7 @@ const HomePage = () => {
   const [openAdminReports, setOpenAdminReports] = useState(false);
   const [openAdminFeedback, setOpenAdminFeedback] = useState(false);
   const [openAdminPromotions, setOpenAdminPromotions] = useState(false);
+  const [openAdminAITraining, setOpenAdminAITraining] = useState(false);
   const [showOffersModal, setShowOffersModal] = useState(false);
   const [offersLoading, setOffersLoading] = useState(false);
   const [offersList, setOffersList] = useState([]);
@@ -51,10 +53,225 @@ const HomePage = () => {
   const [reviewing, setReviewing] = useState(null);
   const [openChat, setOpenChat] = useState(false);
   const [showRoomsOverlay, setShowRoomsOverlay] = useState(false);
+  const [incomingRoomBooking, setIncomingRoomBooking] = useState(null);
   const [returnDraft, setReturnDraft] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [showServicesOverlay, setShowServicesOverlay] = useState(false);
+  const [servicesPrefill, setServicesPrefill] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState('');
   const scrollerRef = useRef(null);
+  const searchSeqRef = useRef(0);
+  const searchAbortRef = useRef(null);
+  const promotionsCacheRef = useRef({ loaded: false, items: [] });
+  const resetPrimaryViews = useCallback(() => {
+    setShowRoomsOverlay(false);
+    setShowServicesOverlay(false);
+    setShowOffersModal(false);
+    setOpenHistory(false);
+    setReviewing(null);
+    setOpenProfile(false);
+  }, []);
+  const closeAdminOverlays = useCallback(() => {
+    setOpenAdminUsers(false);
+    setOpenAdminServices(false);
+    setOpenAdminRooms(false);
+    setOpenAdminAmenities(false);
+    setOpenAdminBookings(false);
+    setOpenAdminReports(false);
+    setOpenAdminFeedback(false);
+    setOpenAdminPromotions(false);
+    setOpenAdminAITraining(false);
+    setHighlightBookingId(null);
+  }, []);
+  const closeSupportOverlays = useCallback(() => {
+    setOpenCheckInOut(false);
+    setOpenCustomerSupport(false);
+  }, []);
+  const formatCurrency = useCallback((value) => {
+    if (value === null || value === undefined) return null;
+    const num = Number(value);
+    if (!Number.isFinite(num)) return null;
+    return `${num.toLocaleString('vi-VN')}₫`;
+  }, []);
+  const resolveImagePath = useCallback((value, fallback = '') => {
+    if (!value) return fallback;
+    try {
+      const str = String(value).trim();
+      if (!str) return fallback;
+      if (/^https?:\/\//i.test(str)) return str;
+      if (str.startsWith('/')) return str;
+      return `/${str.replace(/^\/+/, '')}`;
+    } catch {
+      return fallback;
+    }
+  }, []);
+  const truncateText = useCallback((text, max = 140) => {
+    if (!text) return '';
+    const str = String(text);
+    if (str.length <= max) return str;
+    return `${str.slice(0, max - 1)}…`;
+  }, []);
+  const runSearch = useCallback(async (term, signal) => {
+    const lowered = term.toLowerCase();
+    const matches = [];
+    const issues = new Set();
+    const includes = (value) => {
+      if (!value) return false;
+      try {
+        return value.toString().toLowerCase().includes(lowered);
+      } catch {
+        return false;
+      }
+    };
+    const roomMatches = (roomTypes || [])
+      .filter((rt) => includes(rt.name) || includes(rt.hotelName) || includes(rt.description))
+      .map((rt) => {
+        const score = (includes(rt.name) ? 120 : 0) + (includes(rt.hotelName) ? 30 : 0) + (includes(rt.description) ? 10 : 0);
+        const meta = typeof rt.basePrice !== 'undefined' && rt.basePrice !== null ? `Giá từ ${formatCurrency(rt.basePrice)} / đêm` : null;
+        return {
+          id: `room-${rt.id}`,
+          type: 'room',
+          badge: 'Hạng phòng',
+          title: rt.name,
+          subtitle: rt.hotelName ? `Khách sạn ${rt.hotelName}` : '',
+          description: truncateText(rt.description || ''),
+          meta,
+          image: resolveImagePath(rt.image, '/khachsan/ks11.png'),
+          score: score || 10,
+          raw: rt,
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 12);
+    matches.push(...roomMatches);
+
+    if (signal?.aborted) {
+      return { results: matches, issues: Array.from(issues) };
+    }
+
+    try {
+      const servicesUrl = new URL('/api/services', window.location.origin);
+      servicesUrl.searchParams.set('q', term);
+      servicesUrl.searchParams.set('limit', '8');
+      const res = await fetch(servicesUrl.toString(), { signal, headers: { Accept: 'application/json' } });
+      if (res.ok) {
+        const data = await res.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        const serviceMatches = items.slice(0, 8).map((svc) => {
+          const score = (includes(svc.name) ? 110 : 0) + (includes(svc.hotelName) ? 25 : 0) + (includes(svc.description) ? 12 : 0);
+          return {
+            id: `service-${svc.id}`,
+            type: 'service',
+            badge: 'Dịch vụ',
+            title: svc.name,
+            subtitle: svc.hotelName ? `Khách sạn ${svc.hotelName}` : '',
+            description: truncateText(svc.description || ''),
+            meta: svc.price ? `Giá: ${formatCurrency(svc.price)}` : '',
+            image: resolveImagePath(svc.icon, '/khachsan/ks2.png'),
+            score: score || 8,
+            raw: svc,
+          };
+        });
+        matches.push(...serviceMatches);
+      } else if (!signal?.aborted) {
+        issues.add('danh sách dịch vụ');
+      }
+    } catch (err) {
+      if (!signal?.aborted) issues.add('danh sách dịch vụ');
+    }
+
+    if (signal?.aborted) {
+      return { results: matches, issues: Array.from(issues) };
+    }
+
+    try {
+      if (!promotionsCacheRef.current.loaded) {
+        const promoRes = await fetch('/api/promotions', { signal, headers: { Accept: 'application/json' } });
+        if (promoRes.ok) {
+          const data = await promoRes.json();
+          promotionsCacheRef.current.items = Array.isArray(data.items) ? data.items : [];
+          promotionsCacheRef.current.loaded = true;
+        } else if (!signal?.aborted) {
+          promotionsCacheRef.current.loaded = true;
+          promotionsCacheRef.current.items = [];
+          issues.add('ưu đãi');
+        }
+      }
+      const promos = promotionsCacheRef.current.items || [];
+      const promoMatches = promos
+        .filter((promo) => includes(promo.code) || includes(promo.description) || includes(promo.hotelName))
+        .slice(0, 6)
+        .map((promo) => {
+          const score = (includes(promo.code) ? 115 : 0) + (includes(promo.description) ? 18 : 0) + (includes(promo.hotelName) ? 12 : 0);
+          const endDate = promo.endDate ? new Date(promo.endDate) : null;
+          const meta = endDate ? `Áp dụng đến ${endDate.toLocaleDateString('vi-VN')}` : '';
+          return {
+            id: `promo-${promo.id}`,
+            type: 'promotion',
+            badge: 'Ưu đãi',
+            title: promo.code || 'Ưu đãi',
+            subtitle: promo.hotelName ? `Khách sạn ${promo.hotelName}` : '',
+            description: truncateText(promo.description || ''),
+            meta,
+            image: '/khachsan/ks3.png',
+            score: score || 6,
+            raw: promo,
+          };
+        });
+      matches.push(...promoMatches);
+    } catch (err) {
+      if (!signal?.aborted) issues.add('ưu đãi');
+    }
+
+    const combined = matches
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.title.localeCompare(b.title || '', 'vi', { sensitivity: 'base' });
+      })
+      .slice(0, 18);
+
+    return { results: combined, issues: Array.from(issues) };
+  }, [roomTypes, formatCurrency, resolveImagePath, truncateText]);
+  const clearSearchState = useCallback(() => {
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+      searchAbortRef.current = null;
+    }
+    setSearchInput('');
+    setSearchQuery('');
+    setSearchResults([]);
+    setSearchError('');
+    setSearchLoading(false);
+  }, []);
+  const handleResultClick = useCallback((item) => {
+    if (!item) return;
+    clearSearchState();
+    closeAdminOverlays();
+    closeSupportOverlays();
+    resetPrimaryViews();
+    if (item.type === 'room' && item.raw?.name) {
+      setInlineType(item.raw.name);
+      setTimeout(() => {
+        try {
+          const el = document.querySelector('.home-rooms');
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch {}
+      }, 80);
+      return;
+    }
+    if (item.type === 'service') {
+      setServicesPrefill(item.raw?.name || '');
+      setShowServicesOverlay(true);
+      return;
+    }
+    if (item.type === 'promotion') {
+      setShowOffersModal(true);
+    }
+  }, [clearSearchState, closeAdminOverlays, closeSupportOverlays, resetPrimaryViews]);
   // Load danh sách ưu đãi (offers) khi mở modal hoặc khi người dùng nhấn làm mới
   const refreshOffers = async () => {
     setOffersLoading(true); setOffersError('');
@@ -77,6 +294,50 @@ const HomePage = () => {
     }
   }, [showOffersModal]);
 
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setSearchQuery(searchInput.trim());
+    }, 260);
+    return () => clearTimeout(handler);
+  }, [searchInput]);
+
+  useEffect(() => {
+    if (!searchQuery) {
+      if (searchAbortRef.current) {
+        searchAbortRef.current.abort();
+        searchAbortRef.current = null;
+      }
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError('');
+      return;
+    }
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    const seq = ++searchSeqRef.current;
+    setSearchLoading(true);
+    setSearchError('');
+    runSearch(searchQuery, controller.signal)
+      .then(({ results, issues }) => {
+        if (controller.signal.aborted || seq !== searchSeqRef.current) return;
+        setSearchResults(results);
+        setSearchError(issues.length ? `Không thể tải ${issues.join(', ')}` : '');
+        setSearchLoading(false);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted || seq !== searchSeqRef.current) return;
+        setSearchResults([]);
+        setSearchError(err && err.message ? err.message : 'Không thể tìm kiếm vào lúc này');
+        setSearchLoading(false);
+      });
+    return () => {
+      controller.abort();
+    };
+  }, [runSearch, searchQuery]);
+
   // Khôi phục overlay đặt phòng nếu quay lại từ trang thanh toán với tham số ?return=1
   useEffect(() => {
     try {
@@ -98,6 +359,8 @@ const HomePage = () => {
     const vw = el.clientWidth;
     el.scrollBy({ left: dir * (vw - 40), behavior: 'smooth' });
   };
+
+  const showSearchResults = Boolean(searchInput.trim()) || Boolean(searchQuery) || searchLoading || searchResults.length > 0 || Boolean(searchError);
 
 
   useEffect(() => {
@@ -129,6 +392,146 @@ const HomePage = () => {
     return () => window.removeEventListener('open-admin-bookings', onOpenAdminBookings);
   }, []);
 
+  useEffect(() => {
+    const onOpenRoomBooking = (event) => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      const detail = event && event.detail ? event.detail : {};
+      setIncomingRoomBooking({ ...detail, ts: Date.now() });
+      setShowRoomsOverlay(true);
+    };
+    window.addEventListener('open-room-booking', onOpenRoomBooking);
+    return () => window.removeEventListener('open-room-booking', onOpenRoomBooking);
+  }, [closeAdminOverlays, closeSupportOverlays, resetPrimaryViews]);
+
+  useEffect(() => {
+    const onOpenPayments = () => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      setOpenHistory(true);
+    };
+    window.addEventListener('open-payments', onOpenPayments);
+    return () => window.removeEventListener('open-payments', onOpenPayments);
+  }, [closeAdminOverlays, closeSupportOverlays, resetPrimaryViews]);
+
+  useEffect(() => {
+    const onOpenNotifications = () => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+    };
+    window.addEventListener('open-notifications', onOpenNotifications);
+    return () => window.removeEventListener('open-notifications', onOpenNotifications);
+  }, [closeAdminOverlays, closeSupportOverlays, resetPrimaryViews]);
+
+  useEffect(() => {
+    const openRoomsHandler = (event) => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      const detail = event && event.detail ? event.detail : null;
+      setIncomingRoomBooking(null);
+      const role = String(getUserRole() || '').toLowerCase();
+      if (role === 'admin') {
+        setOpenAdminRooms(true);
+      } else {
+        if (detail && detail.type === 'suggest' && detail.roomName) {
+          setIncomingRoomBooking({ name: detail.roomName, ts: Date.now() });
+        }
+        setShowRoomsOverlay(true);
+      }
+    };
+    const openBookingHandler = (event) => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      const role = String(getUserRole() || '').toLowerCase();
+      if (role === 'admin') {
+        setOpenAdminBookings(true);
+      } else {
+        setIncomingRoomBooking(null);
+        if (event && event.detail) {
+          setIncomingRoomBooking({ detail: event.detail, ts: Date.now() });
+        }
+        setShowRoomsOverlay(true);
+      }
+    };
+    const openServicesHandler = (event) => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      const role = String(getUserRole() || '').toLowerCase();
+      if (role === 'admin') {
+        setOpenAdminServices(true);
+      } else {
+        const query = event && event.detail && typeof event.detail.query === 'string' ? event.detail.query : '';
+        setServicesPrefill(query);
+        setShowServicesOverlay(true);
+      }
+    };
+    const openPromotionsHandler = (event) => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      const role = String(getUserRole() || '').toLowerCase();
+      if (role === 'admin') {
+        setOpenAdminPromotions(true);
+      } else {
+        setShowOffersModal(true);
+      }
+    };
+    const openAmenitiesHandler = (event) => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      const role = String(getUserRole() || '').toLowerCase();
+      if (role === 'admin') {
+        setOpenAdminAmenities(true);
+      } else {
+        const query = event && event.detail && typeof event.detail.query === 'string' ? event.detail.query : '';
+        setServicesPrefill(query);
+        setShowServicesOverlay(true);
+        try {
+          showToast('Đang hiển thị danh sách dịch vụ để tham khảo tiện nghi.', { type: 'info', duration: 2200 });
+        } catch {
+          /* ignore toast errors */
+        }
+      }
+    };
+    const openReviewsHandler = () => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      setReviewing('list');
+    };
+    const openProfileHandler = () => {
+      closeAdminOverlays();
+      closeSupportOverlays();
+      resetPrimaryViews();
+      setOpenProfile(true);
+    };
+
+    window.addEventListener('open-rooms', openRoomsHandler);
+    window.addEventListener('open-booking', openBookingHandler);
+    window.addEventListener('open-services', openServicesHandler);
+    window.addEventListener('open-promotions', openPromotionsHandler);
+    window.addEventListener('open-amenities', openAmenitiesHandler);
+    window.addEventListener('open-reviews', openReviewsHandler);
+    window.addEventListener('open-profile', openProfileHandler);
+
+    return () => {
+      window.removeEventListener('open-rooms', openRoomsHandler);
+      window.removeEventListener('open-booking', openBookingHandler);
+      window.removeEventListener('open-services', openServicesHandler);
+      window.removeEventListener('open-promotions', openPromotionsHandler);
+      window.removeEventListener('open-amenities', openAmenitiesHandler);
+      window.removeEventListener('open-reviews', openReviewsHandler);
+      window.removeEventListener('open-profile', openProfileHandler);
+    };
+  }, [closeAdminOverlays, closeSupportOverlays, resetPrimaryViews]);
+
   const scrollTop = () => {
     try {
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -145,33 +548,80 @@ const HomePage = () => {
           <button type="button" onClick={scrollTop} className="home-header-title home-header-home-btn">TRANG CHỦ</button>
         </div>
         <div className="home-header-search">
-          <input type="text" className="home-header-search-input" placeholder="Tìm kiếm..." />
+          <input
+            type="text"
+            className="home-header-search-input"
+            placeholder="Tìm kiếm..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            aria-label="Tìm kiếm nhanh"
+          />
           <img src="/icon-search.png" alt="Search" className="home-header-search-img" />
         </div>
         <div className="home-header-icons">
           <span className="home-header-icon"><img src="/icon-language.png" alt="Language" className="home-header-icon-img" /></span>
           <NotificationsBell />
           <GridMenu
-            onOpenHistory={() => setOpenHistory(true)}
-            onOpenReviews={() => setReviewing('list')}
-            onOpenServices={() => setShowServicesOverlay(true)}
-            onOpenOffers={() => setShowOffersModal(true)}
-            onOpenAdminUsers={() => setOpenAdminUsers(true)}
-            onOpenAdminServices={() => setOpenAdminServices(true)}
-            onOpenAdminRooms={() => setOpenAdminRooms(true)}
-            onOpenAdminAmenities={() => setOpenAdminAmenities(true)}
-            onOpenAdminBookings={() => setOpenAdminBookings(true)}
-            onOpenAdminReports={() => setOpenAdminReports(true)}
-            onOpenAdminFeedback={() => setOpenAdminFeedback(true)}
-            onOpenAdminPromotions={() => setOpenAdminPromotions(true)}
+            onOpenHistory={() => { resetPrimaryViews(); setOpenHistory(true); }}
+            onOpenReviews={() => { resetPrimaryViews(); setReviewing('list'); }}
+            onOpenServices={() => { resetPrimaryViews(); setServicesPrefill(''); setShowServicesOverlay(true); }}
+            onOpenOffers={() => { resetPrimaryViews(); setShowOffersModal(true); }}
+            onOpenAdminUsers={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminUsers(true); }}
+            onOpenAdminServices={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminServices(true); }}
+            onOpenAdminRooms={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminRooms(true); }}
+            onOpenAdminAmenities={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminAmenities(true); }}
+            onOpenAdminBookings={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminBookings(true); }}
+            onOpenAdminReports={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminReports(true); }}
+            onOpenAdminFeedback={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminFeedback(true); }}
+            onOpenAdminPromotions={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminPromotions(true); }}
+            onOpenAdminAITraining={() => { resetPrimaryViews(); closeSupportOverlays(); setOpenAdminAITraining(true); }}
             // promotions removed
-            onOpenCheckInOut={() => setOpenCheckInOut(true)}
-            onOpenCustomerSupport={() => setOpenCustomerSupport(true)}
+            onOpenCheckInOut={() => { resetPrimaryViews(); setOpenCheckInOut(true); }}
+            onOpenCustomerSupport={() => { resetPrimaryViews(); setOpenCustomerSupport(true); }}
           />
           {/* User menu */}
           <UserMenu onOpenProfile={() => setOpenProfile(true)} />
         </div>
       </header>
+      {showSearchResults && (
+        <section className="home-search-results" aria-live="polite">
+          <div className="home-search-results-head">
+            <h2>Kết quả tìm kiếm</h2>
+            {searchLoading && <span className="home-search-results-status">Đang tìm...</span>}
+          </div>
+          {searchError && <div className="home-search-results-error">{searchError}</div>}
+          {!searchLoading && !searchError && searchResults.length === 0 ? (
+            <div className="home-search-results-empty">Không tìm thấy kết quả phù hợp.</div>
+          ) : (
+            <div className="home-search-results-list">
+              {searchResults.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`home-search-result-card type-${item.type}`}
+                  onClick={() => handleResultClick(item)}
+                >
+                  {item.image && (
+                    <div className="home-search-result-thumb">
+                      <img src={item.image} alt="" loading="lazy" />
+                    </div>
+                  )}
+                  <div className="home-search-result-body">
+                    <span className="home-search-result-type">{item.badge}</span>
+                    <div className="home-search-result-title">{item.title}</div>
+                    {item.subtitle && <div className="home-search-result-sub">{item.subtitle}</div>}
+                    {item.description && <div className="home-search-result-desc">{item.description}</div>}
+                    {item.meta && <div className="home-search-result-meta">{item.meta}</div>}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          {!searchLoading && searchResults.length > 0 && (
+            <div className="home-search-results-note">Chọn một kết quả để mở giao diện tương ứng.</div>
+          )}
+        </section>
+      )}
       {/* Banner Section */}
       <section className="home-banner">
         <img
@@ -266,20 +716,34 @@ const HomePage = () => {
       </section>
 
       {showRoomsOverlay && (
-        <div className="profile-overlay" style={{ zIndex: 1500 }} onMouseDown={(e) => { if (e.target === e.currentTarget) setShowRoomsOverlay(false); }}>
+        <div
+          className="profile-overlay"
+          style={{ zIndex: 1500 }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              setShowRoomsOverlay(false);
+              setIncomingRoomBooking(null);
+            }
+          }}
+        >
           <div className="profile-modal" style={{ width: '95%', maxWidth: 1400, padding: 0, display: 'flex', flexDirection: 'column' }} onMouseDown={e => e.stopPropagation()}>
             <div style={{ flex: 1, overflow: 'auto', padding: '4px 4px 12px' }}>
-              <RoomsBrowse inline onClose={() => setShowRoomsOverlay(false)} restoredDraft={returnDraft} />
+              <RoomsBrowse
+                inline
+                onClose={() => { setShowRoomsOverlay(false); setIncomingRoomBooking(null); }}
+                restoredDraft={returnDraft}
+                incomingBooking={incomingRoomBooking}
+              />
             </div>
           </div>
         </div>
       )}
 
       {showServicesOverlay && (
-        <div className="profile-overlay" style={{ zIndex: 1500 }} onMouseDown={(e) => { if (e.target === e.currentTarget) setShowServicesOverlay(false); }}>
+        <div className="profile-overlay" style={{ zIndex: 1500 }} onMouseDown={(e) => { if (e.target === e.currentTarget) { setShowServicesOverlay(false); setServicesPrefill(''); } }}>
           <div className="profile-modal" style={{ width: '90%', maxWidth: 1200, padding: 0, display: 'flex', flexDirection: 'column' }} onMouseDown={e => e.stopPropagation()}>
             <div style={{ flex: 1, overflow: 'auto', padding: '4px 4px 12px' }}>
-              <ServicesBrowse inline onClose={() => setShowServicesOverlay(false)} />
+              <ServicesBrowse inline prefill={servicesPrefill} onClose={() => { setShowServicesOverlay(false); setServicesPrefill(''); }} />
             </div>
           </div>
         </div>
@@ -600,6 +1064,30 @@ const HomePage = () => {
           </div>
         </div>
       )}
+      {openAdminAITraining && (
+        <div
+          className="profile-overlay"
+          role="dialog"
+          aria-modal="true"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenAdminAITraining(false); }}
+          style={{ alignItems: 'flex-start' }}
+        >
+          <button className="profile-back" type="button" aria-label="Quay lại" onClick={() => setOpenAdminAITraining(false)}>
+            ← Quay lại
+          </button>
+          <div
+            className="profile-modal"
+            style={{ maxWidth: 'calc(100vw - 24px)', width: '100%', marginTop: 56, maxHeight: '90vh', overflow: 'hidden' }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div style={{ background: '#fff', borderRadius: 12, padding: 8, height: '100%', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ flex: 1, overflow: 'auto' }}>
+                <AdminChatbotTraining />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {/* AdminPromotions modal */}
       {openAdminPromotions && (
         <div
@@ -725,7 +1213,7 @@ const HomePage = () => {
 };
 export default HomePage;
 
-function GridMenu({ onOpenHistory, onOpenReviews, onOpenServices, onOpenOffers, onOpenAdminUsers, onOpenAdminServices, onOpenAdminRooms, onOpenAdminPromotions, onOpenAdminBookings, onOpenCheckInOut, onOpenCustomerSupport, onOpenAdminReports, onOpenAdminFeedback, onOpenAdminAmenities }) {
+function GridMenu({ onOpenHistory, onOpenReviews, onOpenServices, onOpenOffers, onOpenAdminUsers, onOpenAdminServices, onOpenAdminRooms, onOpenAdminPromotions, onOpenAdminBookings, onOpenCheckInOut, onOpenCustomerSupport, onOpenAdminReports, onOpenAdminFeedback, onOpenAdminAmenities, onOpenAdminAITraining }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState('');
   const ref = useRef(null);
@@ -753,6 +1241,7 @@ function GridMenu({ onOpenHistory, onOpenReviews, onOpenServices, onOpenOffers, 
       { key: 'manage-amenities', label: 'QUẢN LÝ TIỆN NGHI' },
       { key: 'manage-bookings', label: 'QUẢN LÝ ĐẶT PHÒNG' },
       { key: 'manage-feedback', label: 'QUẢN LÝ PHẢN HỒI' },
+      { key: 'manage-ai-training', label: 'HUẤN LUYỆN CHATBOT AI' },
       { key: 'reports', label: 'BÁO CÁO, THỐNG KÊ' },
     ];
   } else {
@@ -815,6 +1304,7 @@ function GridMenu({ onOpenHistory, onOpenReviews, onOpenServices, onOpenOffers, 
                 if (it.key === 'support' && typeof onOpenCustomerSupport === 'function') { onOpenCustomerSupport(); return; }
                 if (it.key === 'reports' && typeof onOpenAdminReports === 'function') { onOpenAdminReports(); return; }
                 if (it.key === 'manage-feedback' && typeof onOpenAdminFeedback === 'function') { onOpenAdminFeedback(); return; }
+                if (it.key === 'manage-ai-training' && typeof onOpenAdminAITraining === 'function') { onOpenAdminAITraining(); return; }
                 // promotions handler removed
                 if (it.to) navigate(it.to);
               }}

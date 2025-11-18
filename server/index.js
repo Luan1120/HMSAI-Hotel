@@ -164,6 +164,163 @@ function normalizeServiceIcon(p) {
   if (!/^https?:\/\//i.test(v) && !v.startsWith('/')) v = '/' + v;
   return v;
 }
+
+// ===== Chatbot training dataset helpers =====
+const trainingDataPath = path.join(__dirname, 'chatbot_training.json');
+
+function ensureTrainingDataFile() {
+  try {
+    if (!fs.existsSync(trainingDataPath)) {
+      fs.writeFileSync(trainingDataPath, '[]', 'utf8');
+    }
+  } catch (err) {
+    console.error('ensureTrainingDataFile error:', err && err.message ? err.message : err);
+  }
+}
+
+ensureTrainingDataFile();
+
+function toUniqueStringArray(val) {
+  if (!val) return [];
+  let arr;
+  if (Array.isArray(val)) arr = val;
+  else if (typeof val === 'string') arr = val.split(/[,\n]/);
+  else return [];
+  const seen = new Set();
+  const out = [];
+  arr.forEach((item) => {
+    const txt = String(item || '').trim();
+    if (!txt) return;
+    const key = txt.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(txt);
+  });
+  return out;
+}
+
+function sanitizeTrainingEntry(entry) {
+  const baseId = entry && entry.id ? String(entry.id) : `train_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const question = entry && entry.question ? String(entry.question).trim() : '';
+  const answer = entry && entry.answer ? String(entry.answer).trim() : '';
+  const status = entry && entry.status === 'Draft' ? 'Draft' : 'Active';
+  const tags = toUniqueStringArray(entry && entry.tags);
+  const variations = toUniqueStringArray(entry && entry.variations);
+  const suggestions = toUniqueStringArray(entry && entry.suggestions);
+  const createdAt = entry && entry.createdAt ? String(entry.createdAt) : new Date().toISOString();
+  const updatedAt = entry && entry.updatedAt ? String(entry.updatedAt) : createdAt;
+  const usageCount = Number.isFinite(entry && entry.usageCount) ? Number(entry.usageCount) : 0;
+  const lastUsedAt = entry && entry.lastUsedAt ? String(entry.lastUsedAt) : null;
+  const ownerEmail = entry && entry.ownerEmail ? String(entry.ownerEmail) : null;
+  return {
+    id: baseId,
+    question,
+    answer,
+    status,
+    tags,
+    variations,
+    suggestions,
+    createdAt,
+    updatedAt,
+    usageCount,
+    lastUsedAt,
+    ownerEmail,
+  };
+}
+
+function readTrainingData() {
+  ensureTrainingDataFile();
+  try {
+    const raw = fs.readFileSync(trainingDataPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(sanitizeTrainingEntry);
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      ensureTrainingDataFile();
+      return [];
+    }
+    console.error('readTrainingData error:', err && err.message ? err.message : err);
+    return [];
+  }
+}
+
+function writeTrainingData(list) {
+  try {
+    const safe = Array.isArray(list) ? list.map(sanitizeTrainingEntry) : [];
+    fs.writeFileSync(trainingDataPath, JSON.stringify(safe, null, 2), 'utf8');
+  } catch (err) {
+    console.error('writeTrainingData error:', err && err.message ? err.message : err);
+  }
+}
+
+function normalizePlainText(str) {
+  if (!str) return '';
+  return String(str)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoreTrainingEntry(entry, normalizedMessage, tokens, rawLower) {
+  if (!normalizedMessage || !entry) return 0;
+  let best = 0;
+  const pool = [entry.question, ...(entry.variations || []), ...(entry.tags || [])];
+  for (const part of pool) {
+    if (!part) continue;
+    const norm = normalizePlainText(part);
+    if (!norm) continue;
+    if (normalizedMessage === norm) {
+      best = Math.max(best, 120);
+      continue;
+    }
+    if (normalizedMessage.includes(norm) && norm.length >= 3) {
+      best = Math.max(best, 90);
+      continue;
+    }
+    if (norm.includes(normalizedMessage) && normalizedMessage.length >= 3) {
+      best = Math.max(best, 80);
+      continue;
+    }
+    if (rawLower && part.toLowerCase() && rawLower.includes(part.toLowerCase())) {
+      best = Math.max(best, 85);
+    }
+    const pieces = norm.split(' ').filter(Boolean);
+    if (!pieces.length) continue;
+    let matchCount = 0;
+    pieces.forEach((piece) => {
+      if (tokens.has(piece)) matchCount += 1;
+    });
+    if (matchCount) {
+      const coverage = matchCount / pieces.length;
+      const score = coverage * 60 + matchCount * 3;
+      if (score > best) best = score;
+    }
+  }
+  return best;
+}
+
+function findBestTrainingMatch(entries, message) {
+  if (!Array.isArray(entries) || !entries.length) return null;
+  const normalizedMessage = normalizePlainText(message);
+  if (!normalizedMessage) return null;
+  const rawLower = String(message || '').toLowerCase();
+  const tokens = new Set(normalizedMessage.split(' ').filter(Boolean));
+  let bestScore = 0;
+  let bestEntry = null;
+  entries.forEach((entry) => {
+    const score = scoreTrainingEntry(entry, normalizedMessage, tokens, rawLower);
+    if (score > bestScore) {
+      bestScore = score;
+      bestEntry = entry;
+    }
+  });
+  if (bestScore >= 45) return bestEntry;
+  return null;
+}
 async function tableHasColumn(pool, tableName, columnName) {
   try {
     if (!pool) pool = await getPool();
@@ -1779,6 +1936,111 @@ app.get('/api/debug/promo-row', async (req, res) => {
   } catch (e) { console.error('debug promo-row error', e); res.status(500).json({ message: 'Lỗi' }); }
 });
 
+// ===== Admin Chatbot training endpoints =====
+app.get('/api/admin/ai/training', authorize(['Admin']), (req, res) => {
+  try {
+    const q = (req.query.q || '').toString().trim().toLowerCase();
+    const status = (req.query.status || '').toString().trim().toLowerCase();
+    const tag = (req.query.tag || '').toString().trim().toLowerCase();
+    const items = readTrainingData();
+    const filtered = items.filter((it) => {
+      if (status && status !== 'all' && (it.status || 'Active').toLowerCase() !== status) return false;
+      if (tag && tag !== 'all') {
+        const hasTag = (it.tags || []).some((t) => t && t.toLowerCase() === tag);
+        if (!hasTag) return false;
+      }
+      if (!q) return true;
+      const haystack = [it.question, it.answer, (it.variations || []).join(' '), (it.tags || []).join(' ')].join(' ').toLowerCase();
+      return haystack.includes(q);
+    });
+    res.json({ items: filtered.map(sanitizeTrainingEntry), total: items.length });
+  } catch (err) {
+    console.error('GET /api/admin/ai/training error:', err && err.message ? err.message : err);
+    res.status(500).json({ message: 'Không tải được dữ liệu huấn luyện' });
+  }
+});
+
+app.post('/api/admin/ai/training', authorize(['Admin']), (req, res) => {
+  const body = req.body || {};
+  const question = body.question ? String(body.question).trim() : '';
+  const answer = body.answer ? String(body.answer).trim() : '';
+  if (!question) return res.status(400).json({ message: 'Câu hỏi không được để trống' });
+  if (!answer) return res.status(400).json({ message: 'Câu trả lời không được để trống' });
+  try {
+    const now = new Date().toISOString();
+    const items = readTrainingData();
+    const entry = sanitizeTrainingEntry({
+      id: `train_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      question,
+      answer,
+      status: body.status === 'Draft' ? 'Draft' : 'Active',
+      tags: body.tags,
+      variations: body.variations,
+      suggestions: body.suggestions,
+      createdAt: now,
+      updatedAt: now,
+      usageCount: 0,
+      lastUsedAt: null,
+      ownerEmail: req.user && req.user.email ? req.user.email : null,
+    });
+    items.push(entry);
+    writeTrainingData(items);
+    res.json({ item: entry });
+  } catch (err) {
+    console.error('POST /api/admin/ai/training error:', err && err.message ? err.message : err);
+    res.status(500).json({ message: 'Không lưu được mẫu huấn luyện' });
+  }
+});
+
+app.put('/api/admin/ai/training/:id', authorize(['Admin']), (req, res) => {
+  const id = (req.params.id || '').toString().trim();
+  if (!id) return res.status(400).json({ message: 'Thiếu mã mẫu huấn luyện' });
+  const body = req.body || {};
+  try {
+    const items = readTrainingData();
+    const idx = items.findIndex((it) => String(it.id) === id);
+    if (idx === -1) return res.status(404).json({ message: 'Không tìm thấy mẫu huấn luyện' });
+    const current = { ...items[idx] };
+    if (body.question !== undefined) {
+      const nextQ = String(body.question || '').trim();
+      if (!nextQ) return res.status(400).json({ message: 'Câu hỏi không được để trống' });
+      current.question = nextQ;
+    }
+    if (body.answer !== undefined) {
+      const nextA = String(body.answer || '').trim();
+      if (!nextA) return res.status(400).json({ message: 'Câu trả lời không được để trống' });
+      current.answer = nextA;
+    }
+    if (body.status !== undefined) current.status = body.status === 'Draft' ? 'Draft' : 'Active';
+    if (body.tags !== undefined) current.tags = toUniqueStringArray(body.tags);
+    if (body.variations !== undefined) current.variations = toUniqueStringArray(body.variations);
+    if (body.suggestions !== undefined) current.suggestions = toUniqueStringArray(body.suggestions);
+    current.updatedAt = new Date().toISOString();
+    items[idx] = sanitizeTrainingEntry(current);
+    writeTrainingData(items);
+    res.json({ item: items[idx] });
+  } catch (err) {
+    console.error('PUT /api/admin/ai/training/:id error:', err && err.message ? err.message : err);
+    res.status(500).json({ message: 'Không cập nhật được mẫu huấn luyện' });
+  }
+});
+
+app.delete('/api/admin/ai/training/:id', authorize(['Admin']), (req, res) => {
+  const id = (req.params.id || '').toString().trim();
+  if (!id) return res.status(400).json({ message: 'Thiếu mã mẫu huấn luyện' });
+  try {
+    const items = readTrainingData();
+    const idx = items.findIndex((it) => String(it.id) === id);
+    if (idx === -1) return res.status(404).json({ message: 'Không tìm thấy mẫu huấn luyện' });
+    items.splice(idx, 1);
+    writeTrainingData(items);
+    res.json({ message: 'Đã xóa mẫu huấn luyện' });
+  } catch (err) {
+    console.error('DELETE /api/admin/ai/training/:id error:', err && err.message ? err.message : err);
+    res.status(500).json({ message: 'Không xóa được mẫu huấn luyện' });
+  }
+});
+
 // ===== Enhanced AI Chat Endpoint (rule-based + room search) =====
 // POST /api/ai/chat { message, sessionId? }
 // Returns: { reply, suggestions?: string[], results?: [{ id,name,price,maxAdults,maxChildren,rating,image }] }
@@ -1914,6 +2176,8 @@ app.post('/api/ai/chat', async (req, res) => {
     const sessionId = req.body && req.body.sessionId ? String(req.body.sessionId) : undefined;
     if (!userMsg) return res.status(400).json({ message: 'Thiếu nội dung tin nhắn' });
     const lower = userMsg.toLowerCase();
+    const trainingEntriesAll = readTrainingData();
+    const trainingEntriesActive = trainingEntriesAll.filter((it) => (it.status || 'Active') === 'Active');
     const { sid, state } = getSession(sessionId);
     const filters = state.filters || (state.filters = {});
     const suggestions = [];
@@ -2002,6 +2266,18 @@ app.post('/api/ai/chat', async (req, res) => {
       reply = 'Bạn có thể kết hợp tiêu chí: loại phòng (Deluxe), giá (dưới 2 triệu), số khách (2 người lớn), sao (4 sao). Ví dụ: "Deluxe 2 người lớn dưới 2 triệu"';
       suggestions.push('Deluxe 2 người lớn dưới 2 triệu', 'Suite 4 sao', 'Phòng cho 3 người lớn');
       return res.json({ reply, suggestions });
+    }
+
+    const matchedTraining = findBestTrainingMatch(trainingEntriesActive, userMsg);
+    if (matchedTraining) {
+      const nowIso = new Date().toISOString();
+      const idx = trainingEntriesAll.findIndex((it) => String(it.id) === String(matchedTraining.id));
+      if (idx !== -1) {
+        const updated = { ...trainingEntriesAll[idx], usageCount: (trainingEntriesAll[idx].usageCount || 0) + 1, lastUsedAt: nowIso };
+        trainingEntriesAll[idx] = sanitizeTrainingEntry({ ...updated, updatedAt: trainingEntriesAll[idx].updatedAt, createdAt: trainingEntriesAll[idx].createdAt });
+        writeTrainingData(trainingEntriesAll);
+      }
+      return res.json({ reply: matchedTraining.answer, suggestions: (matchedTraining.suggestions || []).slice(0, 6) });
     }
 
     // Fallback: treat as new search query attempt

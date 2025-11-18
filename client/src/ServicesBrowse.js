@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import './RoomsBrowse.css'; // reuse rb-* styles
 
-export default function ServicesBrowse({ inline=false, onClose }) {
+export default function ServicesBrowse({ inline=false, onClose, prefill='' }) {
   const [q, setQ] = useState('');
   const [hotelId, setHotelId] = useState('');
   const [status, setStatus] = useState('');
@@ -45,6 +45,14 @@ export default function ServicesBrowse({ inline=false, onClose }) {
 
   useEffect(()=>{ loadHotels(); }, [loadHotels]);
   useEffect(()=>{ loadServices(); }, [loadServices]);
+
+  const lastPrefillRef = useRef(null);
+  useEffect(() => {
+    if (typeof prefill !== 'string') return;
+    if (prefill === lastPrefillRef.current) return;
+    lastPrefillRef.current = prefill;
+    setQ(prefill);
+  }, [prefill]);
 
   const openDetail = (svc) => { setDetail(svc); setDetailOpen(true); };
   const closeDetail = () => { setDetailOpen(false); setDetail(null); };

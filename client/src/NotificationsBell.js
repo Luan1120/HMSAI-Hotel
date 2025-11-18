@@ -114,6 +114,15 @@ export default function NotificationsBell(){
     return ()=>{ active=false; };
   }, [open]);
 
+  useEffect(() => {
+    const openHistoryFromCommand = () => {
+      setOpen(false);
+      setShowHistory(true);
+    };
+    window.addEventListener('open-notifications', openHistoryFromCommand);
+    return () => window.removeEventListener('open-notifications', openHistoryFromCommand);
+  }, []);
+
   // Đóng khi click ngoài / Esc
   useEffect(()=>{
     const onDoc = (e)=>{ if(dropdownRef.current && !dropdownRef.current.contains(e.target)) setOpen(false); };

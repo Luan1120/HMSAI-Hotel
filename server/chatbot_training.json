@@ -1,0 +1,22 @@
+[
+  {
+    "id": "train_1763430934911_uu5vex",
+    "question": "Tôi muốn Đặt phòng",
+    "answer": "Hãy chọn Hạng phòng",
+    "status": "Active",
+    "tags": [
+      "Đặt phòng"
+    ],
+    "variations": [
+      "Đặt phòng"
+    ],
+    "suggestions": [
+      "Hãy chọn Khu vực cần đặt"
+    ],
+    "createdAt": "2025-11-18T01:55:34.910Z",
+    "updatedAt": "2025-11-18T01:56:41.399Z",
+    "usageCount": 0,
+    "lastUsedAt": null,
+    "ownerEmail": "admin@gmail.com"
+  }
+]

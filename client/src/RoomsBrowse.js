@@ -11,7 +11,7 @@ import showToast from './toast';
    NOTE: Currently there is no public rooms endpoint returning individual rooms; we will call /api/admin/rooms without auth -> backend will 401.
    Fallback strategy: fetch room types (/api/room-types) + display them as pseudo-room rows with aggregate info.
 */
-export default function RoomsBrowse({ inline=false, onClose, restoredDraft=null }){
+export default function RoomsBrowse({ inline=false, onClose, restoredDraft=null, incomingBooking=null }){
   // Helper to normalize status strings into canonical tokens
   const canonicalStatus = (s) => {
     const v = String(s||'').trim().toLowerCase();
@@ -57,6 +57,8 @@ export default function RoomsBrowse({ inline=false, onClose, restoredDraft=null 
   const [error, setError] = useState('');
   const [bookingOpen, setBookingOpen] = useState(false);
   const [bookingRoom, setBookingRoom] = useState(null);
+  const [pendingBooking, setPendingBooking] = useState(null);
+  const lastIncomingRef = useRef(null);
   const [bkCheckIn, setBkCheckIn] = useState('');
   const [bkCheckOut, setBkCheckOut] = useState('');
   const [bkAdults, setBkAdults] = useState(1);
@@ -281,6 +283,34 @@ export default function RoomsBrowse({ inline=false, onClose, restoredDraft=null 
   };
   const closeReviews = () => { setReviewsModal(null); setReviewsData(null); };
 
+  useEffect(() => {
+    if (!pendingBooking) return;
+    const detail = pendingBooking.detail ? pendingBooking.detail : pendingBooking;
+    if (!detail) {
+      setPendingBooking(null);
+      return;
+    }
+    const roomId = detail.roomId ? Number(detail.roomId) : null;
+    if (roomId) {
+      openBookingForRoom({ id: roomId });
+      setPendingBooking(null);
+      return;
+    }
+    if (detail.name) {
+      const targetName = String(detail.name).toLowerCase();
+      const match = rooms.find(r => String(r.roomType || r.name || '').toLowerCase() === targetName);
+      if (match) {
+        openBookingForRoom(match);
+        setPendingBooking(null);
+        return;
+      }
+      if (!q || q.toLowerCase() !== targetName) {
+        setQ(detail.name);
+      }
+    }
+    setPendingBooking(null);
+  }, [pendingBooking, rooms, openBookingForRoom, q]);
+
   // ESC key to close detail modal
   useEffect(()=>{
     const handler = (e) => {
@@ -322,6 +352,13 @@ export default function RoomsBrowse({ inline=false, onClose, restoredDraft=null 
   }, [rooms.length]);
 
   const loggedIn = isLoggedIn();
+
+  useEffect(() => {
+    if (!incomingBooking) return;
+    if (lastIncomingRef.current === incomingBooking) return;
+    lastIncomingRef.current = incomingBooking;
+    setPendingBooking(incomingBooking);
+  }, [incomingBooking]);
   // Helper: validate promo code with server and return normalized promo object
   const validatePromoServer = async (code) => {
     if (!code) throw new Error('Thiếu mã');

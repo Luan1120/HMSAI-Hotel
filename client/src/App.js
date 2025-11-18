@@ -16,6 +16,7 @@ import ReviewForm from './ReviewForm';
 import AdminUsers from './AdminUsers';
 import AdminServices from './AdminServices';
 import { getUserRole } from './auth';
+import AdminChatbotTraining from './AdminChatbotTraining';
 
 function RoomTypeRouteWrapper() {
   const { name } = useParams();
@@ -59,6 +60,7 @@ function App() {
         <Route path="/review" element={<ReviewForm />} />
         <Route path="/admin/users" element={getUserRole()==='Admin' ? <AdminUsers /> : <HomePage />} />
         <Route path="/admin/services" element={['Admin','Staff'].includes(getUserRole()) ? <AdminServices /> : <HomePage />} />
+        <Route path="/admin/ai-training" element={getUserRole()==='Admin' ? <AdminChatbotTraining /> : <HomePage />} />
   {/* Promotions feature removed */}
       </Routes>
     </Router>
