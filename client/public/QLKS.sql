@@ -16,12 +16,12 @@ CREATE TABLE Users (
     name NVARCHAR(50) NOT NULL,
     date_of_birth DATE NULL,
     country NVARCHAR(50) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL,
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL,
     roleId INT NULL FOREIGN KEY REFERENCES Roles(id),
     status NVARCHAR(20) NOT NULL DEFAULT 'Active',
     verificationCode NVARCHAR(10) NULL,
-    verificationCodeExpiresAt DATETIME2 NULL,
+    verificationCodeExpiresAt DATETIME NULL,
     isVerified BIT NOT NULL DEFAULT 0
 );
 
@@ -36,8 +36,8 @@ CREATE TABLE Hotels (
     email NVARCHAR(100) NULL,
     rating DECIMAL(2,1) NULL,
     image NVARCHAR(255) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL
 );
 
 -- Bảng Room_Types
@@ -50,8 +50,8 @@ CREATE TABLE Room_Types (
     maxAdults INT NOT NULL,
     maxChildren INT NOT NULL,
     image NVARCHAR(255) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL
 );
 
 -- Bảng Rooms
@@ -64,8 +64,8 @@ CREATE TABLE Rooms (
     status NVARCHAR(20) NOT NULL,
     image NVARCHAR(255) NULL,
     images NVARCHAR(MAX) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL,
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL,
     description NVARCHAR(255) NULL
 );
 
@@ -78,7 +78,7 @@ CREATE TABLE Services (
     icon NVARCHAR(100),
     hotelId INT NOT NULL FOREIGN KEY REFERENCES Hotels(id),
     status NVARCHAR(20) NOT NULL DEFAULT 'Active',
-    UpdatedAt DATETIME2 NULL
+    UpdatedAt DATETIME NULL
 );
 
 -- Bảng Amenities
@@ -114,8 +114,8 @@ CREATE TABLE Bookings (
     originalAmount DECIMAL(10,2) NULL, -- Giá gốc (gross) trước giảm giá; có thể để NULL với dữ liệu cũ
     totalAmount DECIMAL(10,2) NOT NULL, -- Giá cuối sau giảm giá (net)
     paymentStatus NVARCHAR(20) NOT NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL
 );
 
 -- Bảng Payments
@@ -127,8 +127,8 @@ CREATE TABLE Payments (
     method NVARCHAR(30) NOT NULL,
     status NVARCHAR(20) NOT NULL,
     orderId NVARCHAR(50) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL
 );
 
 -- Bảng Stays
@@ -136,11 +136,11 @@ CREATE TABLE Stays (
     id INT IDENTITY(1,1) PRIMARY KEY,
     bookingId INT NOT NULL FOREIGN KEY REFERENCES Bookings(id),
     roomId INT NOT NULL FOREIGN KEY REFERENCES Rooms(id),
-    actualCheckIn DATETIME2 NULL,
-    actualCheckOut DATETIME2 NULL,
+    actualCheckIn DATETIME NULL,
+    actualCheckOut DATETIME NULL,
     note NVARCHAR(MAX) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL
 );
 
 -- Bảng Reviews
@@ -150,15 +150,15 @@ CREATE TABLE Reviews (
     userId INT NOT NULL FOREIGN KEY REFERENCES Users(id),
     rating INT NOT NULL,
     comment NVARCHAR(MAX) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME()
 );
 
 -- Bảng Chatbot_Sessions
 CREATE TABLE Chatbot_Sessions (
     id INT IDENTITY(1,1) PRIMARY KEY,
     userId INT NULL FOREIGN KEY REFERENCES Users(id),
-    startedAt DATETIME2 NOT NULL,
-    endedAt DATETIME2 NULL,
+    startedAt DATETIME NOT NULL,
+    endedAt DATETIME NULL,
     channel NVARCHAR(20) NOT NULL
 );
 
@@ -170,7 +170,7 @@ CREATE TABLE Chatbot_Messages (
     message NVARCHAR(MAX) NOT NULL,
     intent NVARCHAR(50) NULL,
     confidence DECIMAL(3,2) NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME()
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME()
 );
 
 -- Bảng Notifications
@@ -180,7 +180,7 @@ CREATE TABLE Notifications (
     title NVARCHAR(100) NOT NULL,
     message NVARCHAR(255) NOT NULL,
     type NVARCHAR(20) NOT NULL,
-    sentAt DATETIME2 NOT NULL,
+    sentAt DATETIME NOT NULL,
     isRead BIT NOT NULL DEFAULT 0
 );
 
@@ -191,13 +191,13 @@ CREATE TABLE Promotions (
     description NVARCHAR(255) NULL,
     discountType NVARCHAR(10) NOT NULL,
     discountValue DECIMAL(10,2) NOT NULL,
-    startDate DATETIME2 NOT NULL,
-    endDate DATETIME2 NOT NULL,
+    startDate DATETIME NOT NULL,
+    endDate DATETIME NOT NULL,
     minOrderAmount DECIMAL(10,2) NULL,
     maxDiscount DECIMAL(10,2) NULL,
     isActive BIT NOT NULL DEFAULT 1,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    updatedAt DATETIME2 NULL,
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    updatedAt DATETIME NULL,
     createdBy INT NULL FOREIGN KEY REFERENCES Users(id)
 );
 
@@ -206,8 +206,8 @@ CREATE TABLE Blacklisted_Tokens (
     id INT IDENTITY(1,1) PRIMARY KEY,
     userId INT NOT NULL FOREIGN KEY REFERENCES Users(id),
     token NVARCHAR(MAX) NOT NULL,
-    createdAt DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-    expiresAt DATETIME2 NOT NULL
+    createdAt DATETIME NOT NULL DEFAULT SYSDATETIME(),
+    expiresAt DATETIME NOT NULL
 );
 
 ------------------------------------------------------------
