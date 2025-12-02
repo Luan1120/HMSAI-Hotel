@@ -208,6 +208,8 @@ input[type="password"]::-webkit-input-decoration {
   justify-content: space-between;
   font-size: 20px;
   margin-top: 8px;
+  color: #b3e0ff;
+  font-weight: bold;
 }
 
 .auth-links a {
